@@ -7,21 +7,34 @@ console.log("[test-page] tests.js executed");
 // origin, so vendor.js counts as third-party. Injected dynamically (async by
 // default) so a dead :8001 can never block page load.
 try {
+  const VENDOR_URL = "http://localhost:8001/vendor.js";
   let cspBlockedVendor = false;
   window.addEventListener("securitypolicyviolation", (e) => {
     if (e.blockedURL?.includes("localhost:8001")) cspBlockedVendor = true;
   });
+
   const s = document.createElement("script");
-  s.src = "http://localhost:8001/vendor.js";
+  s.src = VENDOR_URL;
   s.onerror = () => {
-    // A CSP refusal also fires onerror — say WHICH case happened.
-    if (cspBlockedVendor) {
-      console.info(
-        "[test-page] vendor script blocked by active policy (expected under First-party only)",
-      );
-    } else {
-      console.warn("[test-page] vendor server (:8001) not reachable");
-    }
+    // The error event can fire BEFORE the violation event, so judge late.
+    setTimeout(async () => {
+      if (cspBlockedVendor) {
+        console.info(
+          "[test-page] vendor script blocked by active policy (expected under First-party only)",
+        );
+        return;
+      }
+      // Tiebreaker: our CSP restricts scripts only, so a plain fetch probes
+      // true reachability.
+      try {
+        await fetch(VENDOR_URL, { mode: "no-cors", cache: "no-store" });
+        console.info(
+          "[test-page] vendor script blocked by active policy (server reachable)",
+        );
+      } catch {
+        console.warn("[test-page] vendor server (:8001) not reachable");
+      }
+    }, 150);
   };
   document.head.appendChild(s);
 } catch {
