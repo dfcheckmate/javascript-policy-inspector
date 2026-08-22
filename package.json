@@ -1,6 +1,7 @@
 {
   "name": "extension",
   "packageManager": "yarn@4.14.1",
+  "type": "module",
   "devDependencies": {
     "@eslint/css": "^1.4.0",
     "@eslint/js": "^10.0.1",

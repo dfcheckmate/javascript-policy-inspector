@@ -2,19 +2,25 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Inline JS Blocker</title>
+  <title>JS Policy Inspector</title>
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
-  <h1>Inline JS Blocker</h1>
+  <h1>JavaScript Policy Inspector</h1>
   <p id="origin" class="origin">…</p>
-  <p id="state" class="state">checking…</p>
-  <button id="toggle" type="button">Toggle</button>
-  <p class="hint">
-    Blocks inline &lt;script&gt;, javascript: URIs and inline event
-    handlers on this site by appending a CSP response header.
-    External scripts keep running.
-  </p>
+
+  <fieldset id="modes">
+    <legend>Policy for this site</legend>
+    <label><input type="radio" name="mode" value="observe" /> Observe</label>
+    <label><input type="radio" name="mode" value="firstPartyOnly" /> First-party only</label>
+    <label><input type="radio" name="mode" value="noScripts" /> No scripts</label>
+  </fieldset>
+
+  <p id="summary" class="summary"></p>
+
+  <button id="reload" type="button">Reload with policy</button>
+  <p class="hint">Reload applies a changed policy to the page.</p>
+
   <script type="module" src="popup.js"></script>
 </body>
 </html>

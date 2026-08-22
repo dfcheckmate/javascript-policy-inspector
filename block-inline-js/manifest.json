@@ -1,17 +1,17 @@
 {
   "manifest_version": 3,
-  "name": "Inline JS Blocker (local test)",
-  "version": "0.2.0",
-  "description": "Disables inline JavaScript (script tags, javascript: URIs, inline event handlers) per site via CSP header injection. External scripts keep running.",
+  "name": "JavaScript Policy Inspector",
+  "version": "0.1.0",
+  "description": "Per-site JavaScript policies: Observe, First-party only, No scripts. Injected via CSP headers; scripts are inventoried and block reasons explained.",
   "minimum_chrome_version": "101",
-  "permissions": ["declarativeNetRequestWithDynamicAccess", "activeTab"],
-  "optional_host_permissions": ["*://*/*"],
+  "permissions": ["storage", "tabs", "declarativeNetRequest", "webRequest"],
+  "host_permissions": ["*://*/*"],
   "background": {
-    "service_worker": "background.js",
+    "service_worker": "service-worker.js",
     "type": "module"
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Inline JS Blocker"
+    "default_title": "JS Policy Inspector"
   }
 }

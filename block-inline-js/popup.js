@@ -1,19 +1,19 @@
-import { buildRule, patternsFor, ruleIdFor } from "./lib/rules.js";
+import { DEFAULT_MODE, POLICY_SUMMARY } from "./lib/policies.js";
 
 const els = {
   origin: document.getElementById("origin"),
-  state: document.getElementById("state"),
-  toggle: document.getElementById("toggle"),
+  summary: document.getElementById("summary"),
+  reload: document.getElementById("reload"),
+  radios: () => document.querySelectorAll('input[name="mode"]'),
 };
 
 /** @type {string | null} */
 let host = null;
+/** @type {number | null} */
+let tabId = null;
 
-/**
- * Resolves the hostname of the active tab, or null if unsupported
- * (chrome:// pages, file:// URLs, etc.).
- */
-async function activeHost() {
+/** Resolves hostname + tab id of the active tab; null when unsupported. */
+async function activeTabContext() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   let url;
   try {
@@ -21,52 +21,48 @@ async function activeHost() {
   } catch {
     return null;
   }
-  return /^https?:$/.test(url.protocol) && url.hostname ? url.hostname : null;
+  if (!/^https?:$/.test(url.protocol) || !url.hostname) return null;
+  return { host: url.hostname, tabId: tab.id };
 }
 
-async function isEnabled(target) {
-  const { rules } = await chrome.declarativeNetRequest.getDynamicRules();
-  return rules.some((rule) => rule.id === ruleIdFor(target));
+function render(mode) {
+  for (const radio of els.radios()) radio.checked = radio.value === mode;
+  els.summary.textContent = POLICY_SUMMARY[mode] ?? "";
 }
 
-function render(enabled) {
-  if (!host) {
-    els.origin.textContent = "no http(s) page";
-    els.state.textContent = "Open an http(s) page to use the blocker.";
-    els.state.className = "state unsupported";
-    els.toggle.disabled = true;
-    return;
-  }
-  els.origin.textContent = host;
-  els.state.textContent = enabled ? "Inline JS: BLOCKED" : "Inline JS: allowed";
-  els.state.className = enabled ? "state on" : "state off";
-  els.toggle.textContent = enabled ? `Allow inline JS on ${host}` : `Block inline JS on ${host}`;
-}
-
-els.toggle.addEventListener("click", async () => {
-  if (!host) return;
-  if (await isEnabled(host)) {
-    await chrome.declarativeNetRequest.updateDynamicRules({
-      removeRuleIds: [ruleIdFor(host)],
+els.radios().forEach((radio) =>
+  radio.addEventListener("change", async () => {
+    if (!host || !radio.checked) return;
+    const res = await chrome.runtime.sendMessage({
+      type: "set-mode",
+      host,
+      mode: radio.value,
     });
-    try {
-      await chrome.permissions.remove({ origins: patternsFor(host) });
-    } catch {
-      // patterns may already be gone; not fatal
+    if (res?.error) {
+      els.summary.textContent = `Error: ${res.error}`;
+      return;
     }
-  } else {
-    const granted = await chrome.permissions.request({
-      origins: patternsFor(host),
-    });
-    if (!granted) return;
-    await chrome.declarativeNetRequest.updateDynamicRules({
-      addRules: [buildRule(host)],
-      removeRuleIds: [ruleIdFor(host)],
-    });
-  }
-  chrome.runtime.sendMessage({ type: "rules-changed" }).catch(() => {});
-  render(await isEnabled(host));
+    render(radio.value);
+  }),
+);
+
+els.reload.addEventListener("click", async () => {
+  if (tabId !== null) await chrome.tabs.reload(tabId);
+  window.close();
 });
 
-host = await activeHost();
-render(host ? await isEnabled(host) : false);
+const ctx = await activeTabContext();
+if (!ctx) {
+  host = null;
+  els.origin.textContent = "no http(s) page";
+  els.summary.textContent = "Open an http(s) page to inspect it.";
+  els.reload.disabled = true;
+} else {
+  ({ host, tabId } = ctx);
+  els.origin.textContent = host;
+  const state = await chrome.runtime.sendMessage({
+    type: "get-state",
+    host,
+  });
+  render(state?.mode ?? DEFAULT_MODE);
+}
