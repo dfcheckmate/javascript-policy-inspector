@@ -37,6 +37,17 @@
   <script src="external.js"></script>
   <script src="mark.js"></script>
 
+  <!--
+    Third-party simulation: serve this folder on a second port so the script's
+    origin differs from the page's:
+      python3 -m http.server -d test-page/vendor 8001
+    If it isn't running, this just logs a warning.
+  -->
+  <script
+    src="http://localhost:8001/vendor.js"
+    onerror="console.warn('[test-page] vendor server (:8001) not running')"
+  ></script>
+
   <!-- DELIBERATELY INLINE payload under test; must be refused when blocker is ON -->
   <script>
     document.body.dataset.inlineRan = "true";

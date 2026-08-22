@@ -14,6 +14,14 @@ export default defineConfig([
       globals: { ...globals.browser, chrome: "readonly" },
     },
   },
+  {
+    // test-page harness: mark() is defined by mark.js on window and used by
+    // sibling classic scripts
+    files: ["test-page/**/*.js"],
+    languageOptions: {
+      globals: { mark: "readonly" },
+    },
+  },
   { files: ["**/*.json"], plugins: { json }, language: "json/json", extends: ["json/recommended"] },
   { files: ["**/*.css"], plugins: { css }, language: "css/css", extends: ["css/recommended"] },
 ]);
