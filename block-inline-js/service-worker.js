@@ -1,5 +1,5 @@
 import { DEFAULT_MODE, MODES, isMode } from "./lib/policies.js";
-import { buildRule, isPolicyRuleFor } from "./lib/rules.js";
+import { RULE_BANDS, buildRule } from "./lib/rules.js";
 
 const SITE_MODES_KEY = "siteModes";
 const BADGE_COLOR = "#b45309";
@@ -107,9 +107,11 @@ async function getDynamicRulesSafe() {
 }
 
 /**
- * Reconciles dynamic DNR rules with stored modes: removes every rule we own
- * that no longer matches a stored non-observe mode, adds missing ones.
- * Idempotent — safe to run on every install/startup/mode change.
+ * Reconciles dynamic DNR rules with stored modes.
+ * Strategy: wipe every rule in the site-policy band, then rebuild from the
+ * stored map. This makes mode SWITCHES (e.g. firstPartyOnly -> noScripts)
+ * take effect — a diff-based update would keep the old policy because the
+ * host still "has a rule". Idempotent and cheap (few rules at most).
  *
  * Tab-override rules (v0.3) live in a disjoint ID band and are left alone.
  */
@@ -121,12 +123,12 @@ async function syncRules(siteModes) {
     );
     const rules = await getDynamicRulesSafe();
     const removeRuleIds = rules
-      .filter((r) => !hosts.some((h) => isPolicyRuleFor(r, h)))
-      .filter((r) => r.action?.type === "modifyHeaders")
+      .filter(
+        (r) =>
+          r.id >= RULE_BANDS.SITE_POLICY && r.id < RULE_BANDS.TAB_OVERRIDE,
+      )
       .map((r) => r.id);
-    const addRules = hosts
-      .filter((h) => !rules.some((r) => isPolicyRuleFor(r, h)))
-      .map((h) => buildRule(h, modes[h]));
+    const addRules = hosts.map((h) => buildRule(h, modes[h]));
     if (removeRuleIds.length > 0 || addRules.length > 0) {
       await chrome.declarativeNetRequest.updateDynamicRules({
         removeRuleIds,

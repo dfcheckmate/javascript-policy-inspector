@@ -95,3 +95,9 @@ document.getElementById("btn-dynamic").addEventListener("click", () => {
 });
 
 console.log("[test-page] tests.js finished setup");
+
+// Deferred verdicts: payloads whose success marker only appears when they
+// execute get flipped to Blocked once it's clear they never ran.
+setTimeout(() => {
+  if (!window.__blob_external_ran) mark("status-blob-external", false);
+}, 300);
