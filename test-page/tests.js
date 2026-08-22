@@ -3,6 +3,19 @@
 
 console.log("[test-page] tests.js executed");
 
+// Third-party simulation: this folder served on a second port is a different
+// origin, so vendor.js counts as third-party. Injected dynamically (async by
+// default) so a dead :8001 can never block page load.
+try {
+  const s = document.createElement("script");
+  s.src = "http://localhost:8001/vendor.js";
+  s.onerror = () =>
+    console.warn("[test-page] vendor server (:8001) not running");
+  document.head.appendChild(s);
+} catch {
+  console.warn("[test-page] vendor injection failed");
+}
+
 // eval / new Function — NOT in scope; should stay OK under the blocker
 try {
   eval("window.__eval_flag = true;");

@@ -95,11 +95,13 @@
     }
   }
 
+  const root =
+    document.documentElement ?? document;
   new MutationObserver((muts) => {
     for (const m of muts) {
       for (const n of m.addedNodes) processNode(n);
     }
-  }).observe(document.documentElement, { childList: true, subtree: true });
+  }).observe(root, { childList: true, subtree: true });
 
   // Ground truth for anything the active policy blocks (inline scripts,
   // inline handlers, eval()/new Function(), third-party scripts).
