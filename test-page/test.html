@@ -9,10 +9,13 @@
   <h1>Inline JS Blocker Test Page</h1>
 
   <p class="hint">
-    With the blocker <strong>ON</strong> for this origin, every red row stays
-    red and everything else goes green: only inline JS is refused. DevTools
-    console shows a <code>Refused to execute inline script</code> violation
-    for each blocked item.
+    <strong>Observe:</strong> everything executes and turns green.
+    <strong>First-party only:</strong> same-origin files stay green; inline,
+    blob:, eval, Worker and handler rows go red.
+    <strong>No scripts:</strong> every row stays “unknown” by design — the
+    checker itself is page JavaScript. Enforcement proof lives in the DevTools
+    console (<code>script-src 'none'</code> refusals) and the extension
+    popup's Activity list. Handler/dynamic rows need a click.
   </p>
 
   <p id="status-inline">Inline &lt;script&gt; block:<span class="status">unknown</span></p>

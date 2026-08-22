@@ -25,3 +25,9 @@ document.addEventListener("DOMContentLoaded", () => {
     );
   }, 0);
 });
+
+// Passive verdicts from live CSP violations — only meaningful while this
+// file itself is allowed to run (i.e. not under No scripts).
+window.addEventListener("securitypolicyviolation", (e) => {
+  if (e.violatedDirective === "script-src-attr") mark("status-event", false);
+});
