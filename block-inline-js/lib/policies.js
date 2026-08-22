@@ -48,3 +48,39 @@ export function isMode(value) {
 
 /** Default mode for hosts with no stored preference. */
 export const DEFAULT_MODE = MODES.OBSERVE;
+
+/**
+ * Composes the CSP for a mode plus optional per-site allowed origins.
+ * - firstPartyOnly: `'self'` plus the given origins
+ * - noScripts: the origins only (`'none'` while the list is empty)
+ *
+ * @param {string} mode one of MODES
+ * @param {string[]} exceptionOrigins full origins, e.g. "https://cdn.example.com"
+ * @returns {string | null} policy value or null for observe
+ */
+export function composePolicy(mode, exceptionOrigins = []) {
+  const base = CSP_POLICIES[mode];
+  if (!base) return null;
+  const origins = [
+    ...new Set(exceptionOrigins.map((o) => String(o).trim()).filter(Boolean)),
+  ];
+  if (origins.length === 0) return base;
+  if (mode === MODES.NO_SCRIPTS) {
+    return `script-src ${origins.join(" ")}; script-src-attr 'none'; object-src 'none'; base-uri 'none'`;
+  }
+  return base.replace("'self'", `'self' ${origins.join(" ")}`);
+}
+
+/** Validates that a string is a usable http(s) origin for exceptions.
+ * @param {unknown} input
+ * @returns {string | null}
+ */
+export function normalizeOrigin(input) {
+  let url;
+  try {
+    url = new URL(String(input));
+  } catch {
+    return null;
+  }
+  return /^https?:$/.test(url.protocol) ? url.origin : null;
+}

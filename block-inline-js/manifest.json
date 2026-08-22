@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Per-site JavaScript policies: Observe, First-party only, No scripts. Injected via CSP headers; scripts are inventoried and block reasons explained.",
   "minimum_chrome_version": "101",
-  "permissions": ["storage", "tabs", "declarativeNetRequest", "webRequest"],
+  "permissions": ["storage", "tabs", "alarms", "declarativeNetRequest", "webRequest"],
   "host_permissions": ["*://*/*"],
   "background": {
     "service_worker": "service-worker.js",

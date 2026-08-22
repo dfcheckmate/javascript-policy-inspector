@@ -7,6 +7,15 @@ const els = {
   rule: document.getElementById("rule"),
   reload: document.getElementById("reload"),
   radios: () => document.querySelectorAll('input[name="mode"]'),
+  pause: document.getElementById("pause"),
+  pauseState: document.getElementById("pause-state"),
+  allowTab: document.getElementById("allow-tab"),
+  excForm: document.getElementById("exc-form"),
+  excInput: document.getElementById("exc-input"),
+  excList: document.getElementById("exc-list"),
+  exportBtn: document.getElementById("export-btn"),
+  importBtn: document.getElementById("import-btn"),
+  importFile: document.getElementById("import-file"),
 };
 
 /** @type {string | null} */
@@ -51,6 +60,55 @@ async function renderRuleStatus(target) {
   }
 }
 
+function fmtClock(ts) {
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function renderPaused(pausedUntil) {
+  const active = typeof pausedUntil === "number" && pausedUntil > Date.now();
+  els.pause.classList.toggle("active", active);
+  els.pause.textContent = active ? "Resume now" : "Pause 10 min";
+  els.pauseState.textContent = active
+    ? `Policy paused until ${fmtClock(pausedUntil)}`
+    : "";
+}
+
+function renderTabOverride(active) {
+  els.allowTab.classList.toggle("active", active);
+  els.allowTab.textContent = active ? "Allow this tab ✓" : "Allow this tab";
+}
+
+function renderExceptions(list) {
+  els.excList.innerHTML = (list ?? [])
+    .map(
+      (o) =>
+        `<li>${o}<button type="button" data-origin="${o}" title="Remove">×</button></li>`,
+    )
+    .join("");
+}
+
+async function refreshUi() {
+  if (!host) return;
+  const state = await chrome.runtime.sendMessage({
+    type: "get-state",
+    host,
+    tabId,
+  });
+  if (state?.error) return;
+  render(state.mode ?? DEFAULT_MODE);
+  renderPaused(state.pausedUntil);
+  renderTabOverride(Boolean(state.tabOverride));
+  renderExceptions(state.exceptions);
+  await renderRuleStatus(host);
+  await loadActivity();
+}
+
+// ---------------------------------------------------------------------------
+// event wiring
+// ---------------------------------------------------------------------------
+
 els.radios().forEach((radio) =>
   radio.addEventListener("change", async () => {
     if (!host || !radio.checked) return;
@@ -63,7 +121,7 @@ els.radios().forEach((radio) =>
       els.summary.textContent = `Error: ${res.error}`;
       return;
     }
-    render(radio.value);
+    await refreshUi();
   }),
 );
 
@@ -71,6 +129,98 @@ els.reload.addEventListener("click", async () => {
   if (tabId !== null) await chrome.tabs.reload(tabId);
   window.close();
 });
+
+els.pause.addEventListener("click", async () => {
+  if (!host) return;
+  const active =
+    els.pause.classList.contains("active") ||
+    (await chrome.runtime.sendMessage({ type: "get-state", host }))
+      ?.pausedUntil != null;
+  await chrome.runtime.sendMessage(
+    active ? { type: "resume-host", host } : { type: "pause-host", host },
+  );
+  await refreshUi();
+});
+
+els.allowTab.addEventListener("click", async () => {
+  if (tabId === null) return;
+  const res = await chrome.runtime.sendMessage({
+    type: "toggle-tab-override",
+    tabId,
+  });
+  if (res?.active) await chrome.tabs.reload(tabId);
+  await refreshUi();
+});
+
+els.excForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!host) return;
+  const origin = els.excInput.value.trim();
+  if (!origin) return;
+  const res = await chrome.runtime.sendMessage({
+    type: "add-exception",
+    host,
+    origin,
+  });
+  if (res?.error) {
+    els.pauseState.textContent = `Error: ${res.error}`;
+    return;
+  }
+  els.excInput.value = "";
+  await refreshUi();
+});
+
+els.excList.addEventListener("click", async (event) => {
+  const origin = event.target?.dataset?.origin;
+  if (!origin || !host) return;
+  await chrome.runtime.sendMessage({
+    type: "remove-exception",
+    host,
+    origin,
+  });
+  await refreshUi();
+});
+
+els.exportBtn.addEventListener("click", async () => {
+  const data = await chrome.runtime.sendMessage({ type: "export-settings" });
+  if (data?.error) return;
+  const blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "js-policy-inspector-settings.json";
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+els.importBtn.addEventListener("click", () => els.importFile.click());
+
+els.importFile.addEventListener("change", async () => {
+  const file = els.importFile.files?.[0];
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    const res = await chrome.runtime.sendMessage({
+      type: "import-settings",
+      data,
+    });
+    if (res?.error) {
+      els.pauseState.textContent = `Import failed: ${res.error}`;
+      return;
+    }
+    await refreshUi();
+  } catch (err) {
+    els.pauseState.textContent = `Import failed: ${err}`;
+  } finally {
+    els.importFile.value = "";
+  }
+});
+
+// ---------------------------------------------------------------------------
+// inventory / activity rendering
+// ---------------------------------------------------------------------------
 
 const KIND_LABELS = {
   script: "script",
@@ -142,14 +292,10 @@ if (!ctx) {
   els.origin.textContent = "no http(s) page";
   els.summary.textContent = "Open an http(s) page to inspect it.";
   els.reload.disabled = true;
+  els.pause.disabled = true;
+  els.allowTab.disabled = true;
 } else {
   ({ host, tabId } = ctx);
   els.origin.textContent = host;
-  const state = await chrome.runtime.sendMessage({
-    type: "get-state",
-    host,
-  });
-  render(state?.mode ?? DEFAULT_MODE);
-  await renderRuleStatus(host);
-  await loadActivity();
+  await refreshUi();
 }

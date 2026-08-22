@@ -18,7 +18,22 @@
 
   <p id="summary" class="summary"></p>
   <p id="rule" class="rule"></p>
-  <button id="reload" type="button">Reload with policy</button>
+
+  <div class="actions">
+    <button id="reload" type="button">Reload with policy</button>
+    <button id="pause" type="button">Pause 10 min</button>
+    <button id="allow-tab" type="button">Allow this tab</button>
+  </div>
+  <p id="pause-state" class="rule"></p>
+
+  <fieldset>
+    <legend>Allowed script origins on this site</legend>
+    <form id="exc-form">
+      <input id="exc-input" type="text" placeholder="https://cdn.example.com" autocomplete="off" />
+      <button type="submit">Add</button>
+    </form>
+    <ul id="exc-list"></ul>
+  </fieldset>
 
   <h2>Inventory</h2>
   <div id="inventory" class="counts"></div>
@@ -26,6 +41,12 @@
   <h2>Activity</h2>
   <ul id="activity" class="activity"><li class="muted">loading…</li></ul>
   <p id="activity-note" class="hint">Blocked entries come from live CSP violations; reload after changing policy.</p>
+
+  <div class="io">
+    <button id="export-btn" type="button">Export settings</button>
+    <button id="import-btn" type="button">Import settings</button>
+    <input id="import-file" type="file" accept=".json,application/json" hidden />
+  </div>
 
   <script type="module" src="popup.js"></script>
 </body>

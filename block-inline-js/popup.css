@@ -126,3 +126,70 @@ h2 {
 .muted {
   color: #a3a3a3;
 }
+
+.actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.actions #reload {
+  grid-column: 1 / -1;
+}
+
+button.active {
+  background: #fef3c7;
+  border-color: #f59e0b;
+}
+
+#exc-form {
+  display: flex;
+  gap: 6px;
+}
+
+#exc-form input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #d4d4d4;
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+#exc-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+#exc-list li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  color: #065f46;
+  border-radius: 999px;
+  padding: 1px 4px 1px 8px;
+  font-size: 11px;
+  font-family: monospace;
+}
+
+#exc-list li button {
+  width: auto;
+  padding: 0 5px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-weight: bold;
+  color: #047857;
+}
+
+.io {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}

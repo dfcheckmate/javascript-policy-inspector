@@ -6,7 +6,9 @@ import {
   DEFAULT_MODE,
   MODES,
   POLICY_SUMMARY,
+  composePolicy,
   isMode,
+  normalizeOrigin,
 } from "../lib/policies.js";
 import {
   RULE_BANDS,
@@ -89,4 +91,42 @@ test("isPolicyRuleFor matches its own host only", () => {
   assert.ok(isPolicyRuleFor(ours, "example.com"));
   assert.equal(isPolicyRuleFor(ours, "other.com"), false);
   assert.equal(isPolicyRuleFor({ id: 123 }, "example.com"), false);
+});
+
+test("composePolicy: no exceptions returns the base policies", () => {
+  assert.equal(composePolicy(MODES.OBSERVE, ["https://a.com"]), null);
+  assert.equal(composePolicy(MODES.FIRST_PARTY_ONLY), FIRST_PARTY_CSP);
+  assert.equal(composePolicy(MODES.NO_SCRIPTS), NO_SCRIPTS_CSP);
+});
+
+test("composePolicy: first-party appends origins after 'self'", () => {
+  const csp = composePolicy(MODES.FIRST_PARTY_ONLY, [
+    "https://cdn.vendor.example",
+    "https://events.vendor.example",
+  ]);
+  assert.equal(
+    csp,
+    "script-src 'self' https://cdn.vendor.example https://events.vendor.example; script-src-attr 'none'; object-src 'none'; base-uri 'none'",
+  );
+});
+
+test("composePolicy: no-scripts with exceptions replaces 'none'", () => {
+  assert.equal(
+    composePolicy(MODES.NO_SCRIPTS, ["https://cdn.vendor.example"]),
+    "script-src https://cdn.vendor.example; script-src-attr 'none'; object-src 'none'; base-uri 'none'",
+  );
+});
+
+test("composePolicy: dedupes and drops junk entries", () => {
+  assert.equal(
+    composePolicy(MODES.NO_SCRIPTS, ["https://x.com", "https://x.com", "", "  "]),
+    "script-src https://x.com; script-src-attr 'none'; object-src 'none'; base-uri 'none'",
+  );
+});
+
+test("normalizeOrigin accepts only http(s) origins", () => {
+  assert.equal(normalizeOrigin("https://cdn.example.com/path/x.js"), "https://cdn.example.com");
+  assert.equal(normalizeOrigin("http://localhost:8001"), "http://localhost:8001");
+  assert.equal(normalizeOrigin("javascript:alert(1)"), null);
+  assert.equal(normalizeOrigin("not a url"), null);
 });

@@ -1,14 +1,25 @@
-import { DEFAULT_MODE, MODES, isMode } from "./lib/policies.js";
+import {
+  DEFAULT_MODE,
+  MODES,
+  isMode,
+  normalizeOrigin,
+} from "./lib/policies.js";
 import { RULE_BANDS, buildRule } from "./lib/rules.js";
 
 const SITE_MODES_KEY = "siteModes";
+const EXCEPTIONS_KEY = "siteExceptions";
+const PAUSED_KEY = "pausedUntil";
 const BADGE_COLOR = "#b45309";
 const MAX_EVENTS_PER_TAB = 200;
+const PAUSE_MS = 10 * 60 * 1000;
+const OVERRIDE_PRIORITY = 1000;
 
 /** @param {number} tabId */
 const eventsKey = (tabId) => `tabEvents:${tabId}`;
 /** @param {number} tabId */
 const statsKey = (tabId) => `tabStats:${tabId}`;
+/** Tab-scoped CSP-removal overrides live in the reserved band. */
+const tabOverrideId = (tabId) => RULE_BANDS.TAB_OVERRIDE + tabId;
 
 /**
  * @typedef {object} ObsEvent
@@ -21,6 +32,23 @@ const statsKey = (tabId) => `tabStats:${tabId}`;
  * @property {"observed"|"blocked"} action
  * @property {string | null} reason
  */
+
+// ---------------------------------------------------------------------------
+// storage accessors
+// ---------------------------------------------------------------------------
+
+async function getStore(key) {
+  const data = await chrome.storage.local.get(key);
+  return data[key] ?? {};
+}
+
+const getSiteModes = () => getStore(SITE_MODES_KEY);
+const getExceptions = () => getStore(EXCEPTIONS_KEY);
+const getPaused = () => getStore(PAUSED_KEY);
+
+// ---------------------------------------------------------------------------
+// observer event ingestion (bounded per-tab logs in storage.session)
+// ---------------------------------------------------------------------------
 
 /**
  * Derives the popup counters from a tab's event buffer.
@@ -71,64 +99,63 @@ async function ingestEvents(tabId, incoming) {
   });
 }
 
-chrome.tabs.onRemoved.addListener(async (tabId) => {
-  await chrome.storage.session.remove([eventsKey(tabId), statsKey(tabId)]);
-});
+// ---------------------------------------------------------------------------
+// DNR helpers (normalized across Chromium builds, e.g. Edge)
+// ---------------------------------------------------------------------------
 
-/**
- * @returns {Promise<Record<string, string>>} hostname -> mode
- */
-async function getSiteModes() {
-  const data = await chrome.storage.local.get(SITE_MODES_KEY);
-  return data[SITE_MODES_KEY] ?? {};
-}
-
-/**
- * Stores the mode for a host and reconciles DNR rules.
- * @param {string} host
- * @param {string} mode
- */
-async function setSiteMode(host, mode) {
-  if (!isMode(mode)) throw new Error(`invalid mode: ${mode}`);
-  const siteModes = await getSiteModes();
-  siteModes[host] = mode;
-  await chrome.storage.local.set({ [SITE_MODES_KEY]: siteModes });
-  await syncRules(siteModes);
-}
-
-/**
- * Normalizes getDynamicRules() across Chromium builds: some older/forked
- * versions resolve directly to an array instead of `{rules: [...]}`.
- * @returns {Promise<chrome.declarativeNetRequest.Rule[]>}
- */
-async function getDynamicRulesSafe() {
-  const result = await chrome.declarativeNetRequest.getDynamicRules();
+/** Some builds resolve rule queries directly to an array. */
+function normalizeRuleList(result) {
   return Array.isArray(result) ? result : (result?.rules ?? []);
 }
 
+const getSessionRulesSafe = async () =>
+  normalizeRuleList(await chrome.declarativeNetRequest.getSessionRules());
+
+// ---------------------------------------------------------------------------
+// policy reconciliation
+// ---------------------------------------------------------------------------
+
 /**
- * Reconciles dynamic DNR rules with stored modes.
- * Strategy: wipe every rule in the site-policy band, then rebuild from the
- * stored map. This makes mode SWITCHES (e.g. firstPartyOnly -> noScripts)
- * take effect — a diff-based update would keep the old policy because the
- * host still "has a rule". Idempotent and cheap (few rules at most).
+ * Reconciles dynamic DNR rules with stored modes + exceptions + pauses.
+ * Strategy: wipe every rule in the site-policy band, then rebuild from
+ * stored state — mode SWITCHES must take effect, so no diffing.
  *
- * Tab-override rules (v0.3) live in a disjoint ID band and are left alone.
+ * Paused hosts are skipped until their pause expires; expired pauses are
+ * pruned lazily here so a lost alarm can never wedge a host forever.
  */
-async function syncRules(siteModes) {
+async function syncRules() {
   try {
-    const modes = siteModes ?? (await getSiteModes());
+    const [modes, exceptions, paused] = await Promise.all([
+      getSiteModes(),
+      getExceptions(),
+      getPaused(),
+    ]);
+    const now = Date.now();
+    for (const [host, entry] of Object.entries(paused)) {
+      if (entry?.until <= now && modes[host] === MODES.OBSERVE) {
+        modes[host] = entry.mode ?? DEFAULT_MODE;
+        delete paused[host];
+      }
+    }
+    if (Object.keys(paused).length !== Object.values(paused).length) {
+      // prune happened above only when resuming; persist restored modes
+      await chrome.storage.local.set({ [SITE_MODES_KEY]: modes, [PAUSED_KEY]: paused });
+    }
     const hosts = Object.keys(modes).filter(
       (h) => modes[h] !== MODES.OBSERVE,
     );
-    const rules = await getDynamicRulesSafe();
+    const rules = normalizeRuleList(
+      await chrome.declarativeNetRequest.getDynamicRules(),
+    );
     const removeRuleIds = rules
       .filter(
         (r) =>
           r.id >= RULE_BANDS.SITE_POLICY && r.id < RULE_BANDS.TAB_OVERRIDE,
       )
       .map((r) => r.id);
-    const addRules = hosts.map((h) => buildRule(h, modes[h]));
+    const addRules = hosts.map((h) =>
+      buildRule(h, modes[h], exceptions[h] ?? []),
+    );
     if (removeRuleIds.length > 0 || addRules.length > 0) {
       await chrome.declarativeNetRequest.updateDynamicRules({
         removeRuleIds,
@@ -149,22 +176,152 @@ async function refreshBadge(enforcedCount) {
   });
 }
 
+/** @param {string} host @param {string} mode */
+async function setSiteMode(host, mode) {
+  if (!isMode(mode)) throw new Error(`invalid mode: ${mode}`);
+  const siteModes = await getSiteModes();
+  siteModes[host] = mode;
+  await chrome.storage.local.set({ [SITE_MODES_KEY]: siteModes });
+  if (mode === MODES.OBSERVE) await resumeHost(host).catch(() => {});
+  else await syncRules();
+}
+
+// ---------------------------------------------------------------------------
+// temporary controls
+// ---------------------------------------------------------------------------
+
+/** Pauses enforcement for `host` for PAUSE_MS; resumes automatically. */
+async function pauseHost(host) {
+  const paused = await getPaused();
+  paused[host] = Date.now() + PAUSE_MS;
+  await chrome.storage.local.set({ [PAUSED_KEY]: paused });
+  await chrome.alarms.create(`resume:${host}`, { when: paused[host] });
+  await syncRules();
+  return { until: paused[host] };
+}
+
+async function resumeHost(host) {
+  const paused = await getPaused();
+  if (host in paused) {
+    delete paused[host];
+    await chrome.storage.local.set({ [PAUSED_KEY]: paused });
+  }
+  await chrome.alarms.clear(`resume:${host}`);
+  await syncRules();
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name?.startsWith("resume:")) resumeHost(alarm.name.slice(7));
+});
+
+/** Toggles a per-tab session rule that strips ALL CSP response headers. */
+async function toggleTabOverride(tabId) {
+  const id = tabOverrideId(tabId);
+  const active = (await getSessionRulesSafe()).some((r) => r.id === id);
+  if (active) {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [id],
+    });
+    return false;
+  }
+  await chrome.declarativeNetRequest.updateSessionRules({
+    addRules: [
+      {
+        id,
+        priority: OVERRIDE_PRIORITY,
+        action: {
+          type: "modifyHeaders",
+          responseHeaders: [
+            { header: "Content-Security-Policy", operation: "remove" },
+          ],
+        },
+        condition: {
+          tabIds: [tabId],
+          resourceTypes: ["main_frame", "sub_frame"],
+        },
+      },
+    ],
+  });
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// exceptions (per-host allowed script origins)
+// ---------------------------------------------------------------------------
+
+async function addException(host, origin) {
+  const normalized = normalizeOrigin(origin);
+  if (!normalized) throw new Error("origin must be http(s), e.g. https://cdn.example.com");
+  const all = await getExceptions();
+  const list = new Set(all[host] ?? []);
+  list.add(normalized);
+  all[host] = [...list];
+  await chrome.storage.local.set({ [EXCEPTIONS_KEY]: all });
+  await syncRules();
+  return all[host];
+}
+
+async function removeException(host, origin) {
+  const all = await getExceptions();
+  all[host] = (all[host] ?? []).filter((o) => o !== origin);
+  await chrome.storage.local.set({ [EXCEPTIONS_KEY]: all });
+  await syncRules();
+  return all[host];
+}
+
+// ---------------------------------------------------------------------------
+// lifecycle
+// ---------------------------------------------------------------------------
+
 chrome.runtime.onInstalled.addListener(() => syncRules());
 chrome.runtime.onStartup.addListener(() => syncRules());
 
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  await chrome.storage.session.remove([eventsKey(tabId), statsKey(tabId)]);
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [tabOverrideId(tabId)],
+    });
+  } catch {
+    // session store already gone; nothing to clean
+  }
+});
+
 /**
  * Message hub for the popup and observer content scripts.
- * - {type:"get-state", host}          -> {mode}
- * - {type:"set-mode", host, mode}     -> {ok:true}
- * - {type:"obs-events", events}       -> {ok:true}  (tab from sender)
- * - {type:"get-activity", tabId}      -> {events, stats}
+ * - {type:"get-state", host, tabId?}   -> {mode, pausedUntil, tabOverride, exceptions}
+ * - {type:"set-mode", host, mode}      -> {ok:true}
+ * - {type:"obs-events", events}        -> {ok:true}  (tab from sender)
+ * - {type:"get-activity", tabId}       -> {events, stats}
+ * - {type:"pause-host", host}          -> {until}
+ * - {type:"resume-host", host}         -> {ok:true}
+ * - {type:"toggle-tab-override", tabId}-> {active}
+ * - {type:"add-exception", host, origin}    -> {exceptions}
+ * - {type:"remove-exception", host, origin}-> {exceptions}
+ * - {type:"export-settings"}           -> {siteModes, siteExceptions}
+ * - {type:"import-settings", data}     -> {ok:true}
  */
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     switch (msg?.type) {
       case "get-state": {
-        const siteModes = await getSiteModes();
-        sendResponse({ mode: siteModes[msg.host] ?? DEFAULT_MODE });
+        const [siteModes, exceptions, paused] = await Promise.all([
+          getSiteModes(),
+          getExceptions(),
+          getPaused(),
+        ]);
+        const state = {
+          mode: siteModes[msg.host] ?? DEFAULT_MODE,
+          pausedUntil: msg.host in paused ? paused[msg.host] : null,
+          exceptions: exceptions[msg.host] ?? [],
+        };
+        state.tabOverride =
+          typeof msg.tabId === "number"
+            ? (await getSessionRulesSafe()).some(
+                (r) => r.id === tabOverrideId(msg.tabId),
+              )
+            : false;
+        sendResponse(state);
         break;
       }
       case "set-mode": {
@@ -189,6 +346,53 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           events: stored[keys[0]] ?? [],
           stats: stored[keys[1]] ?? null,
         });
+        break;
+      }
+      case "pause-host":
+        sendResponse(await pauseHost(msg.host));
+        break;
+      case "resume-host":
+        await resumeHost(msg.host);
+        sendResponse({ ok: true });
+        break;
+      case "toggle-tab-override": {
+        if (typeof msg.tabId !== "number") {
+          sendResponse({ error: "toggle-tab-override needs tabId" });
+          break;
+        }
+        sendResponse({ active: await toggleTabOverride(msg.tabId) });
+        break;
+      }
+      case "add-exception":
+        sendResponse({ exceptions: await addException(msg.host, msg.origin) });
+        break;
+      case "remove-exception":
+        sendResponse({
+          exceptions: await removeException(msg.host, msg.origin),
+        });
+        break;
+      case "export-settings": {
+        const [siteModes, siteExceptions] = await Promise.all([
+          getSiteModes(),
+          getExceptions(),
+        ]);
+        sendResponse({ siteModes, siteExceptions });
+        break;
+      }
+      case "import-settings": {
+        const data = msg.data ?? {};
+        const siteModes = data.siteModes ?? {};
+        const siteExceptions = data.siteExceptions ?? {};
+        for (const m of Object.values(siteModes)) {
+          if (!isMode(m)) throw new Error(`invalid mode in import: ${m}`);
+        }
+        await chrome.storage.local.set({
+          [SITE_MODES_KEY]: siteModes,
+          [EXCEPTIONS_KEY]: siteExceptions,
+          [PAUSED_KEY]: {},
+        });
+        await syncRules();
+        sendResponse({ ok: true });
         break;
       }
       default:
