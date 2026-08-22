@@ -1,0 +1,44 @@
+body {
+  width: 280px;
+  margin: 0;
+  padding: 12px 14px;
+  font: 13px/1.45 system-ui, sans-serif;
+}
+
+h1 {
+  font-size: 14px;
+  margin: 0 0 8px;
+}
+
+.origin {
+  margin: 0;
+  font-family: ui-monospace, monospace;
+  word-break: break-all;
+}
+
+.state {
+  margin: 8px 0;
+  font-weight: 600;
+}
+
+.state.on { color: #b91c1c; }
+.state.off { color: #15803d; }
+.state.unsupported { color: #525252; font-weight: 400; }
+
+button {
+  width: 100%;
+  padding: 6px 0;
+  border: 1px solid #d4d4d4;
+  border-radius: 6px;
+  background: #fafafa;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) { background: #f0f0f0; }
+button:disabled { cursor: default; opacity: 0.5; }
+
+.hint {
+  margin: 10px 0 0;
+  color: #737373;
+  font-size: 11px;
+}

@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Inline JS Blocker (local test)",
+  "version": "0.2.0",
+  "description": "Disables inline JavaScript (script tags, javascript: URIs, inline event handlers) per site via CSP header injection. External scripts keep running.",
+  "minimum_chrome_version": "101",
+  "permissions": ["declarativeNetRequestWithDynamicAccess", "activeTab"],
+  "optional_host_permissions": ["*://*/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Inline JS Blocker"
+  }
+}

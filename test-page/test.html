@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Inline JS Blocker Test Page</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <h1>Inline JS Blocker Test Page</h1>
+
+  <p class="hint">
+    With the blocker <strong>ON</strong> for this origin, every red row stays
+    red and everything else goes green: only inline JS is refused. DevTools
+    console shows a <code>Refused to execute inline script</code> violation
+    for each blocked item.
+  </p>
+
+  <p id="status-inline">Inline &lt;script&gt; block:<span class="status">unknown</span></p>
+  <p id="status-real-external">External file script (external.js):<span class="status">unknown</span></p>
+  <p id="status-blob-external">Blob-URL script:<span class="status">unknown</span></p>
+  <p id="status-dynamic">Dynamic inline insert (button below):<span class="status">unknown</span></p>
+  <p id="status-event">Inline event handler (button below):<span class="status">unknown</span></p>
+  <p id="status-eval">eval / new Function:<span class="status">unknown</span></p>
+  <p id="status-timer">setTimeout:<span class="status">unknown</span></p>
+  <p id="status-fetch">fetch / XHR:<span class="status">unknown</span></p>
+  <p id="status-worker">Blob Worker:<span class="status">unknown</span></p>
+
+  <button id="btn-dynamic" type="button">Insert dynamic inline script</button>
+  <button id="eventBtn" type="button" onclick="mark('status-event', true, 'Handler executed')">
+    Inline-handler button
+  </button>
+
+  <h2>Log</h2>
+  <pre id="console"></pre>
+
+  <!-- external harness: always allowed -->
+  <script src="external.js"></script>
+  <script src="mark.js"></script>
+
+  <!-- DELIBERATELY INLINE payload under test; must be refused when blocker is ON -->
+  <script>
+    document.body.dataset.inlineRan = "true";
+    mark("status-inline", true, "Executed");
+  </script>
+
+  <script src="tests.js"></script>
+</body>
+</html>
