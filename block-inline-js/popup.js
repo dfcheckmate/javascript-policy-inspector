@@ -1,8 +1,10 @@
 import { DEFAULT_MODE, POLICY_SUMMARY } from "./lib/policies.js";
+import { ruleIdFor } from "./lib/rules.js";
 
 const els = {
   origin: document.getElementById("origin"),
   summary: document.getElementById("summary"),
+  rule: document.getElementById("rule"),
   reload: document.getElementById("reload"),
   radios: () => document.querySelectorAll('input[name="mode"]'),
 };
@@ -28,6 +30,21 @@ async function activeTabContext() {
 function render(mode) {
   for (const radio of els.radios()) radio.checked = radio.value === mode;
   els.summary.textContent = POLICY_SUMMARY[mode] ?? "";
+}
+
+/** Shows whether a DNR rule actually exists for this host right now. */
+async function renderRuleStatus(target) {
+  let line;
+  if (!target) {
+    line = "";
+  } else {
+    const { rules } = await chrome.declarativeNetRequest.getDynamicRules();
+    const rule = rules.find((r) => r.id === ruleIdFor(target));
+    line = rule
+      ? `CSP rule: ACTIVE → ${rule.action.responseHeaders[0].value}`
+      : "CSP rule: none (Observe or not applied)";
+  }
+  els.rule.textContent = line;
 }
 
 els.radios().forEach((radio) =>
@@ -129,5 +146,6 @@ if (!ctx) {
     host,
   });
   render(state?.mode ?? DEFAULT_MODE);
+  await renderRuleStatus(host);
   await loadActivity();
 }

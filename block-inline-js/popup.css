@@ -42,6 +42,14 @@ label {
   color: #525252;
 }
 
+.rule {
+  margin: -6px 0 10px;
+  font-size: 11px;
+  font-family: monospace;
+  color: #171717;
+  word-break: break-all;
+}
+
 button {
   width: 100%;
   padding: 6px 0;
