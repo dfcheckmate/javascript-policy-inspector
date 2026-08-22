@@ -74,11 +74,11 @@ export function composePolicy(mode, allows = {}) {
   const scriptHashes = dedupe(
     (allows.scriptHashes ?? []).map(String).filter((h) => SHA256_RE.test(h)),
   );
+  // tolerate the observer's "attr-" prefixed form
   const attrHashes = dedupe(
     (allows.attrHashes ?? [])
-      .map(String)
-      .filter((h) => SHA256_RE.test(h))
-      .map((h) => h.replace(/^attr-/, "")),
+      .map((h) => String(h).replace(/^attr-/, ""))
+      .filter((h) => SHA256_RE.test(h)),
   );
 
   if (origins.length === 0 && scriptHashes.length === 0 && attrHashes.length === 0) {
