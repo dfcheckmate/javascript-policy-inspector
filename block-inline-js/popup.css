@@ -193,3 +193,47 @@ button.active {
   gap: 6px;
   margin-top: 10px;
 }
+
+.counts .count {
+  cursor: pointer;
+  width: auto;
+}
+
+.counts button.count:hover {
+  border-color: #a3a3a3;
+}
+
+.detail {
+  list-style: none;
+  max-height: 180px;
+  overflow-y: auto;
+  margin: 6px 0 0;
+  padding: 0;
+  font-size: 11px;
+}
+
+.detail li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.detail li .label {
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.detail li .badge {
+  color: #a3a3a3;
+  white-space: nowrap;
+}
+
+.detail li button {
+  width: auto;
+  padding: 1px 8px;
+  font-size: 11px;
+  flex-shrink: 0;
+}

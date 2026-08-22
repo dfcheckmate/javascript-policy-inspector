@@ -47,13 +47,13 @@ export function ruleIdFor(host) {
  *
  * @param {string} host
  * @param {string} mode one of MODES (observe has no CSP and yields no rule)
- * @param {string[]} [exceptionOrigins] per-site allowed origins composed in
+ * @param {{origins?: string[], scriptHashes?: string[], attrHashes?: string[]}} [allows]
  * @returns {chrome.declarativeNetRequest.Rule}
  * @throws {Error} unknown mode or a mode without an enforceable policy
  */
-export function buildRule(host, mode, exceptionOrigins = []) {
+export function buildRule(host, mode, allows = {}) {
   if (!isMode(mode)) throw new Error(`unknown mode: ${mode}`);
-  const value = composePolicy(mode, exceptionOrigins);
+  const value = composePolicy(mode, allows);
   if (!value) throw new Error(`mode "${mode}" has no enforceable CSP`);
   return {
     id: ruleIdFor(host),

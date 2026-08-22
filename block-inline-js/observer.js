@@ -24,6 +24,29 @@
     queue.push({ ts: Date.now(), frame: FRAME, ...event });
   }
 
+  /**
+   * SHA-256 of a payload, formatted as a CSP hash token. Returns null on
+   * insecure contexts (crypto.subtle unavailable) or oversized payloads.
+   * @param {string} text
+   * @returns {Promise<string | null>} e.g. "sha256-AbCd…="
+   */
+  async function hashPayload(text) {
+    try {
+      if (!text || text.length > 100_000 || !crypto?.subtle) return null;
+      const digest = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(text),
+      );
+      let binary = "";
+      for (const byte of new Uint8Array(digest)) {
+        binary += String.fromCharCode(byte);
+      }
+      return `sha256-${btoa(binary)}`;
+    } catch {
+      return null;
+    }
+  }
+
   /** @returns {"first"|"third"|"unknown"} */
   function partyOf(url) {
     try {
@@ -35,7 +58,7 @@
     }
   }
 
-  function recordScript(el) {
+  async function recordScript(el) {
     const src = el.getAttribute("src");
     if (src !== null && src !== "") {
       let abs;
@@ -54,6 +77,8 @@
         reason: null,
       });
     } else {
+      const text = (el.textContent ?? "").trim();
+      const hash = await hashPayload(text);
       push({
         kind: "inline-script",
         url: null,
@@ -61,6 +86,8 @@
         party: "inline",
         action: "observed",
         reason: null,
+        hash,
+        snippet: text.slice(0, 80),
       });
     }
   }
@@ -68,18 +95,27 @@
   function recordHandlers(el) {
     for (const attr of el.attributes) {
       if (/^on/i.test(attr.name)) {
-        push({
-          kind: "inline-handler",
-          url: null,
-          origin: location.origin,
-          party: "inline",
-          action: "observed",
-          reason: null,
-          handler: attr.name.toLowerCase(),
-          target: el.tagName.toLowerCase(),
-        });
+        // Hash is computed async; queue a placeholder then enrich it.
+        enrichHandler(attr, el).catch(() => {});
       }
     }
+  }
+
+  async function enrichHandler(attr, el) {
+    const value = attr.value ?? "";
+    const hash = await hashPayload(value.trim());
+    push({
+      kind: "inline-handler",
+      url: null,
+      origin: location.origin,
+      party: "inline",
+      action: "observed",
+      reason: null,
+      handler: attr.name.toLowerCase(),
+      target: el.tagName.toLowerCase(),
+      hash: hash ? `attr-${hash}` : null,
+      snippet: `${attr.name.toLowerCase()}="${value.slice(0, 60)}"`,
+    });
   }
 
   /** Walk an inserted subtree; parser chunks can carry many nodes at once. */

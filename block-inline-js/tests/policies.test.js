@@ -94,16 +94,15 @@ test("isPolicyRuleFor matches its own host only", () => {
 });
 
 test("composePolicy: no exceptions returns the base policies", () => {
-  assert.equal(composePolicy(MODES.OBSERVE, ["https://a.com"]), null);
+  assert.equal(composePolicy(MODES.OBSERVE, { origins: ["https://a.com"] }), null);
   assert.equal(composePolicy(MODES.FIRST_PARTY_ONLY), FIRST_PARTY_CSP);
   assert.equal(composePolicy(MODES.NO_SCRIPTS), NO_SCRIPTS_CSP);
 });
 
 test("composePolicy: first-party appends origins after 'self'", () => {
-  const csp = composePolicy(MODES.FIRST_PARTY_ONLY, [
-    "https://cdn.vendor.example",
-    "https://events.vendor.example",
-  ]);
+  const csp = composePolicy(MODES.FIRST_PARTY_ONLY, {
+    origins: ["https://cdn.vendor.example", "https://events.vendor.example"],
+  });
   assert.equal(
     csp,
     "script-src 'self' https://cdn.vendor.example https://events.vendor.example; script-src-attr 'none'; object-src 'none'; base-uri 'none'",
@@ -112,14 +111,49 @@ test("composePolicy: first-party appends origins after 'self'", () => {
 
 test("composePolicy: no-scripts with exceptions replaces 'none'", () => {
   assert.equal(
-    composePolicy(MODES.NO_SCRIPTS, ["https://cdn.vendor.example"]),
+    composePolicy(MODES.NO_SCRIPTS, { origins: ["https://cdn.vendor.example"] }),
     "script-src https://cdn.vendor.example; script-src-attr 'none'; object-src 'none'; base-uri 'none'",
+  );
+});
+
+test("composePolicy: inline-script hashes join script-src", () => {
+  assert.equal(
+    composePolicy(MODES.NO_SCRIPTS, { scriptHashes: ["sha256-QR0cIn9RcoA="] }),
+    "script-src sha256-QR0cIn9RcoA=; script-src-attr 'none'; object-src 'none'; base-uri 'none'",
+  );
+});
+
+test("composePolicy: attr hashes replace script-src-attr 'none'", () => {
+  assert.equal(
+    composePolicy(MODES.FIRST_PARTY_ONLY, { attrHashes: ["attr-sha256-Q2V0M69lDdM="] }),
+    "script-src 'self'; script-src-attr sha256-Q2V0M69lDdM=; object-src 'none'; base-uri 'none'",
+  );
+});
+
+test("composePolicy: mixed origins + both hash kinds, deduped", () => {
+  const csp = composePolicy(MODES.NO_SCRIPTS, {
+    origins: ["https://a.com", "https://a.com"],
+    scriptHashes: ["sha256-AAA=", "sha256-BBB="],
+    attrHashes: ["sha256-CCC="],
+  });
+  assert.equal(
+    csp,
+    "script-src https://a.com sha256-AAA= sha256-BBB=; script-src-attr sha256-CCC=; object-src 'none'; base-uri 'none'",
+  );
+});
+
+test("composePolicy: junk hashes are dropped", () => {
+  assert.equal(
+    composePolicy(MODES.NO_SCRIPTS, { scriptHashes: ["evil", "sha256-ok="] }),
+    "script-src sha256-ok=; script-src-attr 'none'; object-src 'none'; base-uri 'none'",
   );
 });
 
 test("composePolicy: dedupes and drops junk entries", () => {
   assert.equal(
-    composePolicy(MODES.NO_SCRIPTS, ["https://x.com", "https://x.com", "", "  "]),
+    composePolicy(MODES.NO_SCRIPTS, {
+      origins: ["https://x.com", "https://x.com", "", "  "],
+    }),
     "script-src https://x.com; script-src-attr 'none'; object-src 'none'; base-uri 'none'",
   );
 });

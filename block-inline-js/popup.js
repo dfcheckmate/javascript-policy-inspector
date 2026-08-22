@@ -97,6 +97,7 @@ async function refreshUi() {
     tabId,
   });
   if (state?.error) return;
+  lastInlineAllows = state.inlineAllows ?? { scripts: [], attrs: [] };
   render(state.mode ?? DEFAULT_MODE);
   renderPaused(state.pausedUntil);
   renderTabOverride(Boolean(state.tabOverride));
@@ -242,19 +243,121 @@ function renderInventory(stats) {
     return;
   }
   const items = [
-    ["1st-party", stats.scriptsFirstParty],
-    ["3rd-party", stats.scriptsThirdParty],
-    ["inline", stats.inlineScripts],
-    ["handlers", stats.inlineHandlers],
-    ["blocked", stats.blocked],
+    ["first", "1st-party", stats.scriptsFirstParty],
+    ["third", "3rd-party", stats.scriptsThirdParty],
+    ["inline-script", "inline", stats.inlineScripts],
+    ["inline-handler", "handlers", stats.inlineHandlers],
+    ["csp-violation", "blocked", stats.blocked],
   ];
   el.innerHTML = items
-    .map(
-      ([label, n]) =>
-        `<span class="count${label === "blocked" && n > 0 ? " hot" : ""}"><b>${n}</b>${label}</span>`,
+    .map(([view, label, n]) =>
+      n === 0
+        ? `<span class="count"><b>${n}</b>${label}</span>`
+        : `<button type="button" class="count${label === "blocked" ? " hot" : ""}" data-view="${view}"><b>${n}</b>${label}</button>`,
     )
     .join("");
 }
+
+/** Dedupes events into rows keyed by their allow-identity. */
+function detailRows(view, events) {
+  const matchers = {
+    first: (e) => e.kind === "script" && e.party === "first",
+    third: (e) => e.kind === "script" && e.party === "third",
+    "inline-script": (e) => e.kind === "inline-script",
+    "inline-handler": (e) => e.kind === "inline-handler",
+    "csp-violation": (e) => e.kind === "csp-violation",
+  };
+  const byKey = new Map();
+  for (const e of events.filter(matchers[view] ?? (() => false))) {
+    const key =
+      e.hash ?? e.url ?? `${e.handler ?? ""}:${e.snippet ?? ""}:${e.reason ?? ""}`;
+    const row = byKey.get(key) ?? { ...e, count: 0 };
+    row.count++;
+    if (!row.hash && e.hash) row.hash = e.hash;
+    byKey.set(key, row);
+  }
+  return [...byKey.values()].map((row) => {
+    let action = null;
+    if ((view === "first" || view === "third") && row.origin) {
+      action = { kind: "origin", value: row.origin };
+    } else if (view === "inline-script" && row.hash) {
+      action = { kind: "script", value: row.hash };
+    } else if (view === "inline-handler" && row.hash) {
+      action = { kind: "attr", value: row.hash };
+    }
+    return { ...row, action };
+  });
+}
+
+function renderDetail(view, events, inlineAllows) {
+  const el = document.getElementById("detail");
+  const allowedSet = new Set([
+    ...(inlineAllows?.scripts ?? []),
+    ...(inlineAllows?.attrs ?? []),
+  ]);
+  if (!view || !Array.isArray(events)) {
+    el.innerHTML = "";
+    return;
+  }
+  const rows = detailRows(view, events);
+  if (rows.length === 0) {
+    el.innerHTML = '<li class="muted">nothing in this category</li>';
+    return;
+  }
+  el.innerHTML = rows
+    .map((row) => {
+      const label =
+        row.url ??
+        row.snippet ??
+        row.reason ??
+        "(unknown)";
+      const badge = row.count > 1 ? `×${row.count}` : "";
+      let button = "";
+      if (row.action) {
+        const alreadyAllowed =
+          row.action.kind === "origin"
+            ? false
+            : allowedSet.has(row.action.value);
+        button = alreadyAllowed
+          ? '<span class="badge">allowed</span>'
+          : `<button type="button" data-kind="${row.action.kind}" data-value="${row.action.value}">Allow</button>`;
+      }
+      return `<li><span class="label">${escapeHtml(label)}</span><span class="badge">${badge}</span>${button}</li>`;
+    })
+    .join("");
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+let currentView = null;
+let lastEvents = [];
+let lastInlineAllows = { scripts: [], attrs: [] };
+
+document.getElementById("inventory").addEventListener("click", (event) => {
+  const view = event.target?.dataset?.view;
+  if (!view) return;
+  currentView = currentView === view ? null : view;
+  renderDetail(currentView, lastEvents, lastInlineAllows);
+});
+
+document.getElementById("detail").addEventListener("click", async (event) => {
+  const btn = event.target.closest("button[data-kind]");
+  if (!btn || !host) return;
+  const { kind, value } = btn.dataset;
+  const message =
+    kind === "origin"
+      ? { type: "add-exception", host, origin: value }
+      : { type: "add-inline-allow", host, kind, hash: value };
+  const res = await chrome.runtime.sendMessage(message);
+  if (res?.error) return;
+  await refreshUi();
+});
 
 function renderActivity(events) {
   const list = document.getElementById("activity");
@@ -282,8 +385,10 @@ async function loadActivity() {
     tabId,
   });
   if (res?.error) return;
+  lastEvents = res.events ?? [];
   renderInventory(res.stats);
-  renderActivity(res.events);
+  renderActivity(lastEvents);
+  renderDetail(currentView, lastEvents, lastInlineAllows);
 }
 
 const ctx = await activeTabContext();

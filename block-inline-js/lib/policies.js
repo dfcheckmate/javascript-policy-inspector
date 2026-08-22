@@ -49,26 +49,55 @@ export function isMode(value) {
 /** Default mode for hosts with no stored preference. */
 export const DEFAULT_MODE = MODES.OBSERVE;
 
+const SHA256_RE = /^sha256-[A-Za-z0-9+/]+={0,2}$/;
+
 /**
- * Composes the CSP for a mode plus optional per-site allowed origins.
- * - firstPartyOnly: `'self'` plus the given origins
- * - noScripts: the origins only (`'none'` while the list is empty)
+ * Composes the CSP for a mode plus optional per-site allowances.
+ * Allowance items (strings) are routed by shape:
+ * - "https://origin"            → script-src source
+ * - "sha256-BASE64"             → script-src hash (allows one inline script)
+ * - "attr-sha256-BASE64"        → script-src-attr hash (allows one handler)
+ *
+ * firstPartyOnly: `'self'` + origins + script hashes.
+ * noScripts: origins + script hashes only (`'none'` while all lists are empty).
+ * Attr hashes replace `script-src-attr 'none'`; without them handlers stay dead.
  *
  * @param {string} mode one of MODES
- * @param {string[]} exceptionOrigins full origins, e.g. "https://cdn.example.com"
+ * @param {{origins?: string[], scriptHashes?: string[], attrHashes?: string[]}} [allows]
  * @returns {string | null} policy value or null for observe
  */
-export function composePolicy(mode, exceptionOrigins = []) {
+export function composePolicy(mode, allows = {}) {
   const base = CSP_POLICIES[mode];
   if (!base) return null;
-  const origins = [
-    ...new Set(exceptionOrigins.map((o) => String(o).trim()).filter(Boolean)),
-  ];
-  if (origins.length === 0) return base;
-  if (mode === MODES.NO_SCRIPTS) {
-    return `script-src ${origins.join(" ")}; script-src-attr 'none'; object-src 'none'; base-uri 'none'`;
+
+  const origins = dedupe((allows.origins ?? []).map(normalizeOrigin).filter(Boolean));
+  const scriptHashes = dedupe(
+    (allows.scriptHashes ?? []).map(String).filter((h) => SHA256_RE.test(h)),
+  );
+  const attrHashes = dedupe(
+    (allows.attrHashes ?? [])
+      .map(String)
+      .filter((h) => SHA256_RE.test(h))
+      .map((h) => h.replace(/^attr-/, "")),
+  );
+
+  if (origins.length === 0 && scriptHashes.length === 0 && attrHashes.length === 0) {
+    return base;
   }
-  return base.replace("'self'", `'self' ${origins.join(" ")}`);
+  const srcParts = [...origins, ...scriptHashes];
+  const scriptSrc =
+    mode === MODES.FIRST_PARTY_ONLY
+      ? ["'self'", ...srcParts].join(" ")
+      : srcParts.length > 0
+        ? srcParts.join(" ")
+        : "'none'";
+  const attrDirective =
+    attrHashes.length > 0 ? `script-src-attr ${attrHashes.join(" ")}` : "script-src-attr 'none'";
+  return `script-src ${scriptSrc}; ${attrDirective}; object-src 'none'; base-uri 'none'`;
+}
+
+function dedupe(list) {
+  return [...new Set(list)];
 }
 
 /** Validates that a string is a usable http(s) origin for exceptions.

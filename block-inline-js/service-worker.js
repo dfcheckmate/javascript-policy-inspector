@@ -8,6 +8,7 @@ import { RULE_BANDS, buildRule } from "./lib/rules.js";
 
 const SITE_MODES_KEY = "siteModes";
 const EXCEPTIONS_KEY = "siteExceptions";
+const INLINE_ALLOWS_KEY = "siteInlineAllows";
 const PAUSED_KEY = "pausedUntil";
 const BADGE_COLOR = "#b45309";
 const MAX_EVENTS_PER_TAB = 200;
@@ -44,6 +45,7 @@ async function getStore(key) {
 
 const getSiteModes = () => getStore(SITE_MODES_KEY);
 const getExceptions = () => getStore(EXCEPTIONS_KEY);
+const getInlineAllows = () => getStore(INLINE_ALLOWS_KEY);
 const getPaused = () => getStore(PAUSED_KEY);
 
 // ---------------------------------------------------------------------------
@@ -125,9 +127,10 @@ const getSessionRulesSafe = async () =>
  */
 async function syncRules() {
   try {
-    const [modes, exceptions, paused] = await Promise.all([
+    const [modes, exceptions, inlineAllows, paused] = await Promise.all([
       getSiteModes(),
       getExceptions(),
+      getInlineAllows(),
       getPaused(),
     ]);
     const now = Date.now();
@@ -154,7 +157,11 @@ async function syncRules() {
       )
       .map((r) => r.id);
     const addRules = hosts.map((h) =>
-      buildRule(h, modes[h], exceptions[h] ?? []),
+      buildRule(h, modes[h], {
+        origins: exceptions[h] ?? [],
+        scriptHashes: inlineAllows[h]?.scripts ?? [],
+        attrHashes: inlineAllows[h]?.attrs ?? [],
+      }),
     );
     if (removeRuleIds.length > 0 || addRules.length > 0) {
       await chrome.declarativeNetRequest.updateDynamicRules({
@@ -269,6 +276,27 @@ async function removeException(host, origin) {
   return all[host];
 }
 
+const SHA256_RE = /^sha256-[A-Za-z0-9+/]+={0,2}$/;
+
+/**
+ * Allows one inline script or handler by adding its CSP hash for a host.
+ * @param {string} host
+ * @param {"script"|"attr"} kind
+ * @param {string} hash "sha256-…" (attr- prefix tolerated)
+ */
+async function addInlineAllow(host, kind, hash) {
+  const clean = String(hash).replace(/^attr-/, "");
+  if (!SHA256_RE.test(clean)) throw new Error("invalid sha256 token");
+  const all = await getInlineAllows();
+  const entry = all[host] ?? { scripts: [], attrs: [] };
+  const list = kind === "attr" ? entry.attrs : entry.scripts;
+  if (!list.includes(clean)) list.push(clean);
+  all[host] = entry;
+  await chrome.storage.local.set({ [INLINE_ALLOWS_KEY]: all });
+  await syncRules();
+  return entry;
+}
+
 // ---------------------------------------------------------------------------
 // lifecycle
 // ---------------------------------------------------------------------------
@@ -305,15 +333,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     switch (msg?.type) {
       case "get-state": {
-        const [siteModes, exceptions, paused] = await Promise.all([
-          getSiteModes(),
-          getExceptions(),
-          getPaused(),
-        ]);
+        const [siteModes, exceptions, inlineAllows, paused] =
+          await Promise.all([
+            getSiteModes(),
+            getExceptions(),
+            getInlineAllows(),
+            getPaused(),
+          ]);
         const state = {
           mode: siteModes[msg.host] ?? DEFAULT_MODE,
           pausedUntil: msg.host in paused ? paused[msg.host] : null,
           exceptions: exceptions[msg.host] ?? [],
+          inlineAllows: inlineAllows[msg.host] ?? { scripts: [], attrs: [] },
         };
         state.tabOverride =
           typeof msg.tabId === "number"
@@ -371,24 +402,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           exceptions: await removeException(msg.host, msg.origin),
         });
         break;
+      case "add-inline-allow":
+        sendResponse({
+          inlineAllows: await addInlineAllow(msg.host, msg.kind, msg.hash),
+        });
+        break;
       case "export-settings": {
-        const [siteModes, siteExceptions] = await Promise.all([
-          getSiteModes(),
-          getExceptions(),
-        ]);
-        sendResponse({ siteModes, siteExceptions });
+        const [siteModes, siteExceptions, siteInlineAllows] =
+          await Promise.all([getSiteModes(), getExceptions(), getInlineAllows()]);
+        sendResponse({ siteModes, siteExceptions, siteInlineAllows });
         break;
       }
       case "import-settings": {
         const data = msg.data ?? {};
         const siteModes = data.siteModes ?? {};
         const siteExceptions = data.siteExceptions ?? {};
+        const siteInlineAllows = data.siteInlineAllows ?? {};
         for (const m of Object.values(siteModes)) {
           if (!isMode(m)) throw new Error(`invalid mode in import: ${m}`);
         }
         await chrome.storage.local.set({
           [SITE_MODES_KEY]: siteModes,
           [EXCEPTIONS_KEY]: siteExceptions,
+          [INLINE_ALLOWS_KEY]: siteInlineAllows,
           [PAUSED_KEY]: {},
         });
         await syncRules();
