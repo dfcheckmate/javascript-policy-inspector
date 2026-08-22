@@ -32,19 +32,23 @@ function render(mode) {
   els.summary.textContent = POLICY_SUMMARY[mode] ?? "";
 }
 
-/** Shows whether a DNR rule actually exists for this host right now. */
+/** Shows whether a DNR rule actually exists for this host right now.
+ *  Normalizes getDynamicRules() across Chromium builds (see service-worker). */
 async function renderRuleStatus(target) {
-  let line;
   if (!target) {
-    line = "";
-  } else {
-    const { rules } = await chrome.declarativeNetRequest.getDynamicRules();
+    els.rule.textContent = "";
+    return;
+  }
+  try {
+    const result = await chrome.declarativeNetRequest.getDynamicRules();
+    const rules = Array.isArray(result) ? result : (result?.rules ?? []);
     const rule = rules.find((r) => r.id === ruleIdFor(target));
-    line = rule
+    els.rule.textContent = rule
       ? `CSP rule: ACTIVE → ${rule.action.responseHeaders[0].value}`
       : "CSP rule: none (Observe or not applied)";
+  } catch (err) {
+    els.rule.textContent = `CSP rule: error — ${err}`;
   }
-  els.rule.textContent = line;
 }
 
 els.radios().forEach((radio) =>

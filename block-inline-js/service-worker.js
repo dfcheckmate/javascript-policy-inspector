@@ -97,6 +97,16 @@ async function setSiteMode(host, mode) {
 }
 
 /**
+ * Normalizes getDynamicRules() across Chromium builds: some older/forked
+ * versions resolve directly to an array instead of `{rules: [...]}`.
+ * @returns {Promise<chrome.declarativeNetRequest.Rule[]>}
+ */
+async function getDynamicRulesSafe() {
+  const result = await chrome.declarativeNetRequest.getDynamicRules();
+  return Array.isArray(result) ? result : (result?.rules ?? []);
+}
+
+/**
  * Reconciles dynamic DNR rules with stored modes: removes every rule we own
  * that no longer matches a stored non-observe mode, adds missing ones.
  * Idempotent — safe to run on every install/startup/mode change.
@@ -104,25 +114,29 @@ async function setSiteMode(host, mode) {
  * Tab-override rules (v0.3) live in a disjoint ID band and are left alone.
  */
 async function syncRules(siteModes) {
-  const modes = siteModes ?? (await getSiteModes());
-  const hosts = Object.keys(modes).filter(
-    (h) => modes[h] !== MODES.OBSERVE,
-  );
-  const { rules } = await chrome.declarativeNetRequest.getDynamicRules();
-  const removeRuleIds = rules
-    .filter((r) => !hosts.some((h) => isPolicyRuleFor(r, h)))
-    .filter((r) => r.action?.type === "modifyHeaders")
-    .map((r) => r.id);
-  const addRules = hosts
-    .filter((h) => !rules.some((r) => isPolicyRuleFor(r, h)))
-    .map((h) => buildRule(h, modes[h]));
-  if (removeRuleIds.length > 0 || addRules.length > 0) {
-    await chrome.declarativeNetRequest.updateDynamicRules({
-      removeRuleIds,
-      addRules,
-    });
+  try {
+    const modes = siteModes ?? (await getSiteModes());
+    const hosts = Object.keys(modes).filter(
+      (h) => modes[h] !== MODES.OBSERVE,
+    );
+    const rules = await getDynamicRulesSafe();
+    const removeRuleIds = rules
+      .filter((r) => !hosts.some((h) => isPolicyRuleFor(r, h)))
+      .filter((r) => r.action?.type === "modifyHeaders")
+      .map((r) => r.id);
+    const addRules = hosts
+      .filter((h) => !rules.some((r) => isPolicyRuleFor(r, h)))
+      .map((h) => buildRule(h, modes[h]));
+    if (removeRuleIds.length > 0 || addRules.length > 0) {
+      await chrome.declarativeNetRequest.updateDynamicRules({
+        removeRuleIds,
+        addRules,
+      });
+    }
+    await refreshBadge(hosts.length);
+  } catch (err) {
+    console.error("[policy-inspector] syncRules failed:", err);
   }
-  await refreshBadge(hosts.length);
 }
 
 async function refreshBadge(enforcedCount) {
