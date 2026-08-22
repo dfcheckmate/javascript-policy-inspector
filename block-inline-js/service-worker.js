@@ -12,6 +12,8 @@ const INLINE_ALLOWS_KEY = "siteInlineAllows";
 const PAUSED_KEY = "pausedUntil";
 const BADGE_COLOR = "#b45309";
 const MAX_EVENTS_PER_TAB = 200;
+const MAX_NET_PER_TAB = 300;
+const NET_FLUSH_MS = 400;
 const PAUSE_MS = 10 * 60 * 1000;
 const OVERRIDE_PRIORITY = 1000;
 
@@ -19,6 +21,8 @@ const OVERRIDE_PRIORITY = 1000;
 const eventsKey = (tabId) => `tabEvents:${tabId}`;
 /** @param {number} tabId */
 const statsKey = (tabId) => `tabStats:${tabId}`;
+/** @param {number} tabId */
+const netKey = (tabId) => `tabNet:${tabId}`;
 /** Tab-scoped CSP-removal overrides live in the reserved band. */
 const tabOverrideId = (tabId) => RULE_BANDS.TAB_OVERRIDE + tabId;
 
@@ -100,6 +104,108 @@ async function ingestEvents(tabId, incoming) {
     [statsKey(tabId)]: computeStats(merged),
   });
 }
+
+// ---------------------------------------------------------------------------
+// webRequest observation (network view; strictly read-only)
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {object} NetEvent
+ * @property {number} ts
+ * @property {"net"} kind
+ * @property {string} method
+ * @property {string} url
+ * @property {string} type resource type (script, xhr, image, main_frame, …)
+ * @property {string} status "" until settled, then HTTP code or error token
+ */
+
+/** Per-tab buffers awaiting a debounced write. */
+const netPending = new Map();
+const netTimers = new Map();
+
+function scheduleNetFlush(tabId) {
+  if (netTimers.has(tabId)) return;
+  netTimers.set(
+    tabId,
+    setTimeout(() => {
+      netTimers.delete(tabId);
+      flushNet(tabId).catch(() => {});
+    }, NET_FLUSH_MS),
+  );
+}
+
+async function flushNetNow(tabId) {
+  const timer = netTimers.get(tabId);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    netTimers.delete(tabId);
+  }
+  await flushNet(tabId);
+}
+
+async function flushNet(tabId) {
+  const buf = netPending.get(tabId);
+  if (!buf || buf.entries.length === 0) return;
+  // Detach first: requests arriving during the awaits below open a fresh
+  // buffer and re-arm their own timer.
+  netPending.delete(tabId);
+  const key = netKey(tabId);
+  try {
+    const stored = await chrome.storage.session.get([key, statsKey(tabId)]);
+    const merged = (stored[key] ?? [])
+      .concat(buf.entries)
+      .slice(-MAX_NET_PER_TAB);
+    const stats = stored[statsKey(tabId)] ?? {};
+    stats.netRequests = merged.length;
+    await chrome.storage.session.set({
+      [key]: merged,
+      [statsKey(tabId)]: stats,
+    });
+  } catch {
+    // session store unavailable — drop this batch rather than wedge the SW
+  }
+}
+
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    if (details.tabId < 0) return; // non-tab traffic (SW fetches, prerender)
+    let buf = netPending.get(details.tabId);
+    if (!buf) {
+      buf = { entries: [], byReqId: new Map() };
+      netPending.set(details.tabId, buf);
+    }
+    const entry = /** @type {NetEvent} */ ({
+      ts: details.timeStamp,
+      kind: "net",
+      method: details.method,
+      url: details.url,
+      type: details.type,
+      status: "",
+    });
+    buf.entries.push(entry);
+    // redirects reuse the requestId; last onBeforeRequest wins
+    buf.byReqId.set(details.requestId, entry);
+    if (buf.entries.length > 25) void flushNetNow(details.tabId);
+    else scheduleNetFlush(details.tabId);
+  },
+  { urls: ["<all_urls>"] },
+);
+
+function patchNet(details, patch) {
+  if (details.tabId < 0) return;
+  const entry = netPending.get(details.tabId)?.byReqId.get(details.requestId);
+  if (entry) Object.assign(entry, patch); // already-flushed entries stay ""
+}
+
+chrome.webRequest.onCompleted.addListener(
+  (details) => patchNet(details, { status: String(details.statusCode) }),
+  { urls: ["<all_urls>"] },
+);
+
+chrome.webRequest.onErrorOccurred.addListener(
+  (details) => patchNet(details, { status: details.error ?? "ERR" }),
+  { urls: ["<all_urls>"] },
+);
 
 // ---------------------------------------------------------------------------
 // DNR helpers (normalized across Chromium builds, e.g. Edge)
@@ -305,7 +411,17 @@ chrome.runtime.onInstalled.addListener(() => syncRules());
 chrome.runtime.onStartup.addListener(() => syncRules());
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  await chrome.storage.session.remove([eventsKey(tabId), statsKey(tabId)]);
+  await chrome.storage.session.remove([
+    eventsKey(tabId),
+    statsKey(tabId),
+    netKey(tabId),
+  ]);
+  netPending.delete(tabId);
+  const timer = netTimers.get(tabId);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    netTimers.delete(tabId);
+  }
   try {
     await chrome.declarativeNetRequest.updateSessionRules({
       removeRuleIds: [tabOverrideId(tabId)],
@@ -320,7 +436,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
  * - {type:"get-state", host, tabId?}   -> {mode, pausedUntil, tabOverride, exceptions}
  * - {type:"set-mode", host, mode}      -> {ok:true}
  * - {type:"obs-events", events}        -> {ok:true}  (tab from sender)
- * - {type:"get-activity", tabId}       -> {events, stats}
+ * - {type:"get-activity", tabId}       -> {events, stats, netEvents}
  * - {type:"pause-host", host}          -> {until}
  * - {type:"resume-host", host}         -> {ok:true}
  * - {type:"toggle-tab-override", tabId}-> {active}
@@ -371,11 +487,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         break;
       }
       case "get-activity": {
-        const keys = [eventsKey(msg.tabId), statsKey(msg.tabId)];
+        const keys = [
+          eventsKey(msg.tabId),
+          statsKey(msg.tabId),
+          netKey(msg.tabId),
+        ];
         const stored = await chrome.storage.session.get(keys);
         sendResponse({
           events: stored[keys[0]] ?? [],
           stats: stored[keys[1]] ?? null,
+          netEvents: stored[keys[2]] ?? [],
         });
         break;
       }

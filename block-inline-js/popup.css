@@ -237,3 +237,8 @@ button.active {
   font-size: 11px;
   flex-shrink: 0;
 }
+
+.detail li.bad .badge {
+  color: #b91c1c;
+  font-weight: 600;
+}

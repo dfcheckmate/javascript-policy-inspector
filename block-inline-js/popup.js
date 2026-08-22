@@ -248,6 +248,7 @@ function renderInventory(stats) {
     ["inline-script", "inline", stats.inlineScripts],
     ["inline-handler", "handlers", stats.inlineHandlers],
     ["csp-violation", "blocked", stats.blocked],
+    ["net", "network", stats.netRequests ?? 0],
   ];
   el.innerHTML = items
     .map(([view, label, n]) =>
@@ -266,14 +267,20 @@ function detailRows(view, events) {
     "inline-script": (e) => e.kind === "inline-script",
     "inline-handler": (e) => e.kind === "inline-handler",
     "csp-violation": (e) => e.kind === "csp-violation",
+    net: (e) => e.kind === "net",
   };
   const byKey = new Map();
   for (const e of events.filter(matchers[view] ?? (() => false))) {
     const key =
-      e.hash ?? e.url ?? `${e.handler ?? ""}:${e.snippet ?? ""}:${e.reason ?? ""}`;
+      view === "net"
+        ? `${e.method}:${e.url}`
+        : (e.hash ??
+          e.url ??
+          `${e.handler ?? ""}:${e.snippet ?? ""}:${e.reason ?? ""}`);
     const row = byKey.get(key) ?? { ...e, count: 0 };
     row.count++;
     if (!row.hash && e.hash) row.hash = e.hash;
+    if (!row.status && e.status) row.status = e.status;
     byKey.set(key, row);
   }
   return [...byKey.values()].map((row) => {
@@ -302,6 +309,19 @@ function renderDetail(view, events, inlineAllows) {
   const rows = detailRows(view, events);
   if (rows.length === 0) {
     el.innerHTML = '<li class="muted">nothing in this category</li>';
+    return;
+  }
+  if (view === "net") {
+    // observation-only: no Allow actions, show method/target + type/status
+    el.innerHTML = rows
+      .map((row) => {
+        const badge =
+          `${row.type ?? ""}${row.status ? ` · ${row.status}` : " · …"}` +
+          (row.count > 1 ? ` · ×${row.count}` : "");
+        const cls = /ERR|FAILED/.test(row.status ?? "") ? ' class="bad"' : "";
+        return `<li${cls}><span class="label">${escapeHtml(`${row.method} ${row.url}`)}</span><span class="badge">${escapeHtml(badge)}</span></li>`;
+      })
+      .join("");
     return;
   }
   el.innerHTML = rows
@@ -337,13 +357,16 @@ function escapeHtml(text) {
 
 let currentView = null;
 let lastEvents = [];
+let lastNetEvents = [];
 let lastInlineAllows = { scripts: [], attrs: [] };
+
+const allEvents = () => [...lastEvents, ...lastNetEvents];
 
 document.getElementById("inventory").addEventListener("click", (event) => {
   const view = event.target?.dataset?.view;
   if (!view) return;
   currentView = currentView === view ? null : view;
-  renderDetail(currentView, lastEvents, lastInlineAllows);
+  renderDetail(currentView, allEvents(), lastInlineAllows);
 });
 
 document.getElementById("detail").addEventListener("click", async (event) => {
@@ -386,9 +409,10 @@ async function loadActivity() {
   });
   if (res?.error) return;
   lastEvents = res.events ?? [];
+  lastNetEvents = res.netEvents ?? [];
   renderInventory(res.stats);
   renderActivity(lastEvents);
-  renderDetail(currentView, lastEvents, lastInlineAllows);
+  renderDetail(currentView, allEvents(), lastInlineAllows);
 }
 
 const ctx = await activeTabContext();
