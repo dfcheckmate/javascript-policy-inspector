@@ -5,7 +5,7 @@ import css from "@eslint/css";
 import { defineConfig } from "eslint/config";
 
 export default defineConfig([
-  { ignores: ["**/.yarn/**", "**/node_modules/**"] },
+  { ignores: ["**/.yarn/**", "**/node_modules/**", "block-inline-js/*.bundled.js"] },
   {
     files: ["**/*.{js,mjs,cjs}"],
     plugins: { js },

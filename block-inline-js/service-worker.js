@@ -382,7 +382,7 @@ async function removeException(host, origin) {
   return all[host];
 }
 
-const SHA256_RE = /^sha256-[A-Za-z0-9+/]+={0,2}$/;
+const ALLOWED_HASH_RE = /^sha256-[A-Za-z0-9+/]+={0,2}$/;
 
 /**
  * Allows one inline script or handler by adding its CSP hash for a host.
@@ -392,7 +392,7 @@ const SHA256_RE = /^sha256-[A-Za-z0-9+/]+={0,2}$/;
  */
 async function addInlineAllow(host, kind, hash) {
   const clean = String(hash).replace(/^attr-/, "");
-  if (!SHA256_RE.test(clean)) throw new Error("invalid sha256 token");
+  if (!ALLOWED_HASH_RE.test(clean)) throw new Error("invalid sha256 token");
   const all = await getInlineAllows();
   const entry = all[host] ?? { scripts: [], attrs: [] };
   const list = kind === "attr" ? entry.attrs : entry.scripts;

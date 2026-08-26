@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "JavaScript Policy Inspector",
+  "version": "0.1.0",
+  "description": "Per-site JavaScript policies: Observe, First-party only, No scripts. Injected via CSP headers; scripts are inventoried and block reasons explained.",
+  "permissions": ["storage", "tabs", "alarms", "declarativeNetRequest", "webRequest"],
+  "host_permissions": ["*://*/*"],
+  "background": {
+    "scripts": ["service-worker.bundled.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["observer.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "JS Policy Inspector"
+  }
+}
