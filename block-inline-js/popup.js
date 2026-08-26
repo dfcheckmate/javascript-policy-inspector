@@ -319,18 +319,17 @@ function renderDetail(view, events, inlineAllows) {
           `${row.type ?? ""}${row.status ? ` · ${row.status}` : " · …"}` +
           (row.count > 1 ? ` · ×${row.count}` : "");
         const cls = /ERR|FAILED/.test(row.status ?? "") ? ' class="bad"' : "";
-        return `<li${cls}><span class="label">${escapeHtml(`${row.method} ${row.url}`)}</span><span class="badge">${escapeHtml(badge)}</span></li>`;
+        const title = escapeHtml(`${row.method} ${row.url}`);
+        return `<li${cls}><span class="label" title="${title}">${title}</span><span class="badge">${escapeHtml(badge)}</span></li>`;
       })
       .join("");
     return;
   }
   el.innerHTML = rows
     .map((row) => {
-      const label =
-        row.url ??
-        row.snippet ??
-        row.reason ??
-        "(unknown)";
+      const full =
+        row.url ?? row.snippet ?? row.reason ?? "(unknown)";
+      const label = escapeHtml(full);
       const badge = row.count > 1 ? `×${row.count}` : "";
       let button = "";
       if (row.action) {
@@ -342,7 +341,7 @@ function renderDetail(view, events, inlineAllows) {
           ? '<span class="badge">allowed</span>'
           : `<button type="button" data-kind="${row.action.kind}" data-value="${row.action.value}">Allow</button>`;
       }
-      return `<li><span class="label">${escapeHtml(label)}</span><span class="badge">${badge}</span>${button}</li>`;
+      return `<li><span class="label" title="${label}">${escapeHtml(label)}</span><span class="badge">${badge}</span>${button}</li>`;
     })
     .join("");
 }
@@ -370,16 +369,28 @@ document.getElementById("inventory").addEventListener("click", (event) => {
 });
 
 document.getElementById("detail").addEventListener("click", async (event) => {
+  // Allow buttons take precedence; row clicks expand/collapse.
   const btn = event.target.closest("button[data-kind]");
-  if (!btn || !host) return;
-  const { kind, value } = btn.dataset;
-  const message =
-    kind === "origin"
-      ? { type: "add-exception", host, origin: value }
-      : { type: "add-inline-allow", host, kind, hash: value };
-  const res = await chrome.runtime.sendMessage(message);
-  if (res?.error) return;
-  await refreshUi();
+  if (btn) {
+    if (!host) return;
+    const { kind, value } = btn.dataset;
+    const message =
+      kind === "origin"
+        ? { type: "add-exception", host, origin: value }
+        : { type: "add-inline-allow", host, kind, hash: value };
+    const res = await chrome.runtime.sendMessage(message);
+    if (res?.error) return;
+    await refreshUi();
+    return;
+  }
+  const li = event.target.closest("li");
+  if (li) li.classList.toggle("expanded");
+});
+
+document.getElementById("activity").addEventListener("click", (event) => {
+  if (event.target.closest("button")) return;
+  const li = event.target.closest("li");
+  if (li) li.classList.toggle("expanded");
 });
 
 function renderActivity(events) {
@@ -396,7 +407,7 @@ function renderActivity(events) {
           ? e.reason ?? "violation"
           : `${KIND_LABELS[e.kind] ?? e.kind}${e.url ? `: ${e.url}` : ""}`;
       const cls = e.action === "blocked" ? "blocked" : "";
-      return `<li class="${cls}"><time>${fmtTime(e.ts)}</time> ${what}</li>`;
+      return `<li class="${cls}" title="${escapeHtml(what)}"><time>${fmtTime(e.ts)}</time> <span class="line">${escapeHtml(what)}</span></li>`;
     })
     .join("");
 }

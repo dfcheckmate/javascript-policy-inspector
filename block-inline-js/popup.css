@@ -1,5 +1,5 @@
 body {
-  width: 300px;
+  width: 360px;
   margin: 0;
   padding: 12px 14px;
   font: 13px/1.45 system-ui, sans-serif;
@@ -110,6 +110,22 @@ h2 {
 .activity li {
   padding: 3px 0;
   border-bottom: 1px solid #f0f0f0;
+  cursor: zoom-in;
+}
+
+.activity li .line {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activity li.expanded {
+  cursor: zoom-out;
+}
+
+.activity li.expanded .line {
+  white-space: normal;
   word-break: break-all;
 }
 
@@ -205,7 +221,7 @@ button.active {
 
 .detail {
   list-style: none;
-  max-height: 180px;
+  max-height: 240px;
   overflow-y: auto;
   margin: 6px 0 0;
   padding: 0;
@@ -218,11 +234,23 @@ button.active {
   gap: 6px;
   padding: 3px 0;
   border-bottom: 1px solid #f0f0f0;
+  cursor: zoom-in;
 }
 
 .detail li .label {
   flex: 1;
   min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detail li.expanded {
+  cursor: zoom-out;
+}
+
+.detail li.expanded .label {
+  white-space: normal;
   word-break: break-all;
 }
 

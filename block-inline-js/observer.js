@@ -87,7 +87,7 @@
         action: "observed",
         reason: null,
         hash,
-        snippet: text.slice(0, 80),
+        snippet: text.slice(0, 200),
       });
     }
   }
