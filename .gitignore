@@ -19,6 +19,8 @@ node_modules
 # Extension build artifacts and signing keys
 *.crx
 *.pem
+dist-firefox/
+service-worker.bundled.js
 
 # IDE
 *.vscode
