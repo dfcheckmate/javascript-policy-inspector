@@ -5,6 +5,11 @@
   "description": "Per-site JavaScript policies: Observe, First-party only, No scripts. Injected via CSP headers; scripts are inventoried and block reasons explained.",
   "permissions": ["storage", "tabs", "alarms", "declarativeNetRequest", "webRequest"],
   "host_permissions": ["*://*/*"],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "javascript-policy-inspector@akamai"
+    }
+  },
   "background": {
     "scripts": ["service-worker.bundled.js"]
   },
