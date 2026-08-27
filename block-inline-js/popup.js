@@ -99,6 +99,7 @@ async function refreshUi() {
   });
   if (state?.error) return;
   lastInlineAllows = state.inlineAllows ?? { scripts: [], attrs: [] };
+  lastExceptions = state.exceptions ?? [];
   render(state.mode ?? DEFAULT_MODE);
   renderPaused(state.pausedUntil);
   renderTabOverride(Boolean(state.tabOverride));
@@ -297,12 +298,13 @@ function detailRows(view, events) {
   });
 }
 
-function renderDetail(view, events, inlineAllows) {
+function renderDetail(view, events, inlineAllows, exceptions) {
   const el = document.getElementById("detail");
   const allowedSet = new Set([
     ...(inlineAllows?.scripts ?? []),
     ...(inlineAllows?.attrs ?? []),
   ]);
+  const excSet = new Set(exceptions ?? []);
   if (!view || !Array.isArray(events)) {
     el.innerHTML = "";
     return;
@@ -313,7 +315,10 @@ function renderDetail(view, events, inlineAllows) {
     return;
   }
   if (view === "net") {
-    // observation-only: no Allow actions, show method/target + type/status
+    // Network request rows. Our CSP only gates *script* requests, so an
+    // Allow action (adding the request's origin to the site exceptions) is
+    // meaningful solely for script-type rows; every other type stays
+    // observation-only.
     el.innerHTML = rows
       .map((row) => {
         const badge =
@@ -321,7 +326,17 @@ function renderDetail(view, events, inlineAllows) {
           (row.count > 1 ? ` · ×${row.count}` : "");
         const cls = /ERR|FAILED/.test(row.status ?? "") ? ' class="bad"' : "";
         const title = escapeHtml(`${row.method} ${row.url}`);
-        return `<li${cls}><span class="label" title="${title}">${title}</span><span class="badge">${escapeHtml(badge)}</span></li>`;
+        let button = "";
+        if (row.type === "script") {
+          const origin = originOf(row.url);
+          if (origin) {
+            const already = excSet.has(origin);
+            button = already
+              ? '<span class="badge">allowed</span>'
+              : `<button type="button" data-kind="origin" data-value="${escapeHtml(origin)}">Allow</button>`;
+          }
+        }
+        return `<li${cls}><span class="label" title="${title}">${title}</span><span class="badge">${escapeHtml(badge)}</span>${button}</li>`;
       })
       .join("");
     return;
@@ -355,10 +370,21 @@ function escapeHtml(text) {
     .replaceAll('"', "&quot;");
 }
 
+/** @param {string} url @returns {string | null} scheme://host[:port] */
+function originOf(url) {
+  try {
+    const u = new URL(url);
+    return /^https?:$/.test(u.protocol) ? u.origin : null;
+  } catch {
+    return null;
+  }
+}
+
 let currentView = null;
 let lastEvents = [];
 let lastNetEvents = [];
 let lastInlineAllows = { scripts: [], attrs: [] };
+let lastExceptions = [];
 
 const allEvents = () => [...lastEvents, ...lastNetEvents];
 
@@ -366,7 +392,7 @@ document.getElementById("inventory").addEventListener("click", (event) => {
   const view = event.target?.dataset?.view;
   if (!view) return;
   currentView = currentView === view ? null : view;
-  renderDetail(currentView, allEvents(), lastInlineAllows);
+  renderDetail(currentView, allEvents(), lastInlineAllows, lastExceptions);
 });
 
 document.getElementById("detail").addEventListener("click", async (event) => {
@@ -424,7 +450,7 @@ async function loadActivity() {
   lastNetEvents = res.netEvents ?? [];
   renderInventory(res.stats);
   renderActivity(lastEvents);
-  renderDetail(currentView, allEvents(), lastInlineAllows);
+  renderDetail(currentView, allEvents(), lastInlineAllows, lastExceptions);
 }
 
 const ctx = await activeTabContext();
