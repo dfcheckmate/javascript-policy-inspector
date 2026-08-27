@@ -14,6 +14,7 @@ import {
   RULE_BANDS,
   buildRule,
   isPolicyRuleFor,
+  normalizeHostForRule,
   ruleIdFor,
 } from "../lib/rules.js";
 
@@ -117,35 +118,42 @@ test("composePolicy: no-scripts with exceptions replaces 'none'", () => {
 });
 
 test("composePolicy: inline-script hashes join script-src", () => {
+  const h = "sha256-QR0cIn9RcoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
   assert.equal(
-    composePolicy(MODES.NO_SCRIPTS, { scriptHashes: ["sha256-QR0cIn9RcoA="] }),
-    "script-src sha256-QR0cIn9RcoA=; script-src-attr 'none'; object-src 'none'; base-uri 'none'",
+    composePolicy(MODES.NO_SCRIPTS, { scriptHashes: [h] }),
+    `script-src ${h}; script-src-attr 'none'; object-src 'none'; base-uri 'none'`,
   );
 });
 
 test("composePolicy: attr hashes replace script-src-attr 'none'", () => {
+  const h = "sha256-Q2V0M69lDdMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
   assert.equal(
-    composePolicy(MODES.FIRST_PARTY_ONLY, { attrHashes: ["attr-sha256-Q2V0M69lDdM="] }),
-    "script-src 'self'; script-src-attr sha256-Q2V0M69lDdM=; object-src 'none'; base-uri 'none'",
+    composePolicy(MODES.FIRST_PARTY_ONLY, { attrHashes: [`attr-${h}`] }),
+    `script-src 'self'; script-src-attr ${h}; object-src 'none'; base-uri 'none'`,
   );
 });
 
 test("composePolicy: mixed origins + both hash kinds, deduped", () => {
+  const a = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+  const b = "sha256-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=";
+  const c = "sha256-CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=";
   const csp = composePolicy(MODES.NO_SCRIPTS, {
     origins: ["https://a.com", "https://a.com"],
-    scriptHashes: ["sha256-AAA=", "sha256-BBB="],
-    attrHashes: ["sha256-CCC="],
+    scriptHashes: [a, b],
+    attrHashes: [c],
   });
   assert.equal(
     csp,
-    "script-src https://a.com sha256-AAA= sha256-BBB=; script-src-attr sha256-CCC=; object-src 'none'; base-uri 'none'",
+    `script-src https://a.com ${a} ${b}; script-src-attr ${c}; object-src 'none'; base-uri 'none'`,
   );
 });
 
-test("composePolicy: junk hashes are dropped", () => {
+test("composePolicy: truncated hash tokens are dropped (never emit a dead source)", () => {
   assert.equal(
-    composePolicy(MODES.NO_SCRIPTS, { scriptHashes: ["evil", "sha256-ok="] }),
-    "script-src sha256-ok=; script-src-attr 'none'; object-src 'none'; base-uri 'none'",
+    composePolicy(MODES.NO_SCRIPTS, {
+      scriptHashes: ["sha256-too-short", "evil"],
+    }),
+    "script-src 'none'; script-src-attr 'none'; object-src 'none'; base-uri 'none'",
   );
 });
 
@@ -163,4 +171,21 @@ test("normalizeOrigin accepts only http(s) origins", () => {
   assert.equal(normalizeOrigin("http://localhost:8001"), "http://localhost:8001");
   assert.equal(normalizeOrigin("javascript:alert(1)"), null);
   assert.equal(normalizeOrigin("not a url"), null);
+});
+
+test("ruleIdFor folds subdomains to the same id as their apex", () => {
+  assert.equal(ruleIdFor("www.example.com"), ruleIdFor("example.com"));
+  assert.equal(ruleIdFor("api.example.com"), ruleIdFor("example.com"));
+});
+
+test("normalizeHostForRule preserves localhost, IPs, and single labels", () => {
+  assert.equal(normalizeHostForRule("localhost"), "localhost");
+  assert.equal(normalizeHostForRule("127.0.0.1"), "127.0.0.1");
+  assert.equal(normalizeHostForRule("LOCALHOST"), "localhost");
+});
+
+test("normalizeHostForRule folds common suffixes to 3 labels, else 2", () => {
+  assert.equal(normalizeHostForRule("www.bbc.co.uk"), "bbc.co.uk");
+  assert.equal(normalizeHostForRule("a.b.example.com"), "example.com");
+  assert.equal(normalizeHostForRule("WWW.Example.COM"), "example.com");
 });

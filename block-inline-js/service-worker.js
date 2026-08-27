@@ -4,7 +4,12 @@ import {
   isMode,
   normalizeOrigin,
 } from "./lib/policies.js";
-import { RULE_BANDS, buildRule } from "./lib/rules.js";
+import {
+  RULE_BANDS,
+  buildRule,
+  normalizeHostForRule,
+  ruleIdFor,
+} from "./lib/rules.js";
 
 const SITE_MODES_KEY = "siteModes";
 const EXCEPTIONS_KEY = "siteExceptions";
@@ -51,6 +56,9 @@ const getSiteModes = () => getStore(SITE_MODES_KEY);
 const getExceptions = () => getStore(EXCEPTIONS_KEY);
 const getInlineAllows = () => getStore(INLINE_ALLOWS_KEY);
 const getPaused = () => getStore(PAUSED_KEY);
+
+/** Host storage keys are always stored in canonical (eTLD+1) form. */
+const canon = (host) => normalizeHostForRule(host);
 
 // ---------------------------------------------------------------------------
 // observer event ingestion (bounded per-tab logs in storage.session)
@@ -250,9 +258,16 @@ async function syncRules() {
       // prune happened above only when resuming; persist restored modes
       await chrome.storage.local.set({ [SITE_MODES_KEY]: modes, [PAUSED_KEY]: paused });
     }
-    const hosts = Object.keys(modes).filter(
-      (h) => modes[h] !== MODES.OBSERVE,
-    );
+    const hosts = Object.keys(modes)
+      .map(normalizeHostForRule)
+      .filter((h) => h && modes[normalizeHostForRule(h)] !== MODES.OBSERVE);
+    const seenHosts = new Set();
+    const effectiveHosts = [];
+    for (const h of hosts) {
+      if (seenHosts.has(h)) continue; // normalized duplicates (subdomains)
+      seenHosts.add(h);
+      effectiveHosts.push(h);
+    }
     const rules = normalizeRuleList(
       await chrome.declarativeNetRequest.getDynamicRules(),
     );
@@ -262,7 +277,25 @@ async function syncRules() {
           r.id >= RULE_BANDS.SITE_POLICY && r.id < RULE_BANDS.TAB_OVERRIDE,
       )
       .map((r) => r.id);
-    const addRules = hosts.map((h) =>
+    // Deterministic FNV rule ids can collide for large site sets. Detect
+    // and surface any collision instead of silently letting the second
+    // host's rule overwrite the first's (the DNR default on id reuse).
+    const idOwner = new Map();
+    const addHosts = [];
+    for (const h of effectiveHosts) {
+      const id = ruleIdFor(h);
+      const existing = idOwner.get(id);
+      if (existing !== undefined && existing !== h) {
+        console.warn(
+          `[policy-inspector] rule-id collision: "${h}" vs "${existing}" — ` +
+            `skipping "${h}". Normalize host further or adjust the dedicated range.`,
+        );
+        continue;
+      }
+      idOwner.set(id, h);
+      addHosts.push(h);
+    }
+    const addRules = addHosts.map((h) =>
       buildRule(h, modes[h], {
         origins: exceptions[h] ?? [],
         scriptHashes: inlineAllows[h]?.scripts ?? [],
@@ -293,7 +326,8 @@ async function refreshBadge(enforcedCount) {
 async function setSiteMode(host, mode) {
   if (!isMode(mode)) throw new Error(`invalid mode: ${mode}`);
   const siteModes = await getSiteModes();
-  siteModes[host] = mode;
+  const key = canon(host);
+  siteModes[key] = mode;
   await chrome.storage.local.set({ [SITE_MODES_KEY]: siteModes });
   if (mode === MODES.OBSERVE) await resumeHost(host).catch(() => {});
   else await syncRules();
@@ -306,20 +340,22 @@ async function setSiteMode(host, mode) {
 /** Pauses enforcement for `host` for PAUSE_MS; resumes automatically. */
 async function pauseHost(host) {
   const paused = await getPaused();
-  paused[host] = Date.now() + PAUSE_MS;
+  const key = canon(host);
+  paused[key] = Date.now() + PAUSE_MS;
   await chrome.storage.local.set({ [PAUSED_KEY]: paused });
-  await chrome.alarms.create(`resume:${host}`, { when: paused[host] });
+  await chrome.alarms.create(`resume:${key}`, { when: paused[key] });
   await syncRules();
-  return { until: paused[host] };
+  return { until: paused[key] };
 }
 
 async function resumeHost(host) {
   const paused = await getPaused();
-  if (host in paused) {
-    delete paused[host];
+  const key = canon(host);
+  if (key in paused) {
+    delete paused[key];
     await chrome.storage.local.set({ [PAUSED_KEY]: paused });
   }
-  await chrome.alarms.clear(`resume:${host}`);
+  await chrome.alarms.clear(`resume:${key}`);
   await syncRules();
 }
 
@@ -366,23 +402,25 @@ async function addException(host, origin) {
   const normalized = normalizeOrigin(origin);
   if (!normalized) throw new Error("origin must be http(s), e.g. https://cdn.example.com");
   const all = await getExceptions();
-  const list = new Set(all[host] ?? []);
+  const key = canon(host);
+  const list = new Set(all[key] ?? []);
   list.add(normalized);
-  all[host] = [...list];
+  all[key] = [...list];
   await chrome.storage.local.set({ [EXCEPTIONS_KEY]: all });
   await syncRules();
-  return all[host];
+  return all[key];
 }
 
 async function removeException(host, origin) {
   const all = await getExceptions();
-  all[host] = (all[host] ?? []).filter((o) => o !== origin);
+  const key = canon(host);
+  all[key] = (all[key] ?? []).filter((o) => o !== origin);
   await chrome.storage.local.set({ [EXCEPTIONS_KEY]: all });
   await syncRules();
-  return all[host];
+  return all[key];
 }
 
-const ALLOWED_HASH_RE = /^sha256-[A-Za-z0-9+/]+={0,2}$/;
+const ALLOWED_HASH_RE = /^sha256-[A-Za-z0-9+/]{40,}={0,2}$/;
 
 /**
  * Allows one inline script or handler by adding its CSP hash for a host.
@@ -392,12 +430,17 @@ const ALLOWED_HASH_RE = /^sha256-[A-Za-z0-9+/]+={0,2}$/;
  */
 async function addInlineAllow(host, kind, hash) {
   const clean = String(hash).replace(/^attr-/, "");
-  if (!ALLOWED_HASH_RE.test(clean)) throw new Error("invalid sha256 token");
+  if (!ALLOWED_HASH_RE.test(clean)) {
+    // A truncated/absent hash token can never match a script; reject it
+    // up front so the popup shows a real error instead of a dead Allow.
+    throw new Error("invalid sha256 token (expected sha256- followed by 44 base64 chars)");
+  }
   const all = await getInlineAllows();
-  const entry = all[host] ?? { scripts: [], attrs: [] };
+  const key = canon(host);
+  const entry = all[key] ?? { scripts: [], attrs: [] };
   const list = kind === "attr" ? entry.attrs : entry.scripts;
   if (!list.includes(clean)) list.push(clean);
-  all[host] = entry;
+  all[key] = entry;
   await chrome.storage.local.set({ [INLINE_ALLOWS_KEY]: all });
   await syncRules();
   return entry;
@@ -456,11 +499,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             getInlineAllows(),
             getPaused(),
           ]);
+        const key = canon(msg.host);
         const state = {
-          mode: siteModes[msg.host] ?? DEFAULT_MODE,
-          pausedUntil: msg.host in paused ? paused[msg.host] : null,
-          exceptions: exceptions[msg.host] ?? [],
-          inlineAllows: inlineAllows[msg.host] ?? { scripts: [], attrs: [] },
+          host: key,
+          mode: siteModes[key] ?? DEFAULT_MODE,
+          pausedUntil: key in paused ? paused[key] : null,
+          exceptions: exceptions[key] ?? [],
+          inlineAllows: inlineAllows[key] ?? { scripts: [], attrs: [] },
         };
         state.tabOverride =
           typeof msg.tabId === "number"
@@ -536,16 +581,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case "import-settings": {
         const data = msg.data ?? {};
-        const siteModes = data.siteModes ?? {};
-        const siteExceptions = data.siteExceptions ?? {};
-        const siteInlineAllows = data.siteInlineAllows ?? {};
-        for (const m of Object.values(siteModes)) {
-          if (!isMode(m)) throw new Error(`invalid mode in import: ${m}`);
+        for (const v of Object.values(data.siteModes ?? {})) {
+          if (!isMode(v)) throw new Error(`invalid mode in import: ${v}`);
         }
+        const rekey = (obj) => {
+          const out = {};
+          for (const [k, v] of Object.entries(obj ?? {})) out[canon(k)] = v;
+          return out;
+        };
         await chrome.storage.local.set({
-          [SITE_MODES_KEY]: siteModes,
-          [EXCEPTIONS_KEY]: siteExceptions,
-          [INLINE_ALLOWS_KEY]: siteInlineAllows,
+          [SITE_MODES_KEY]: rekey(data.siteModes),
+          [EXCEPTIONS_KEY]: rekey(data.siteExceptions),
+          [INLINE_ALLOWS_KEY]: rekey(data.siteInlineAllows),
           [PAUSED_KEY]: {},
         });
         await syncRules();

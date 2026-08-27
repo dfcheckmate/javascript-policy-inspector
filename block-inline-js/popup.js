@@ -1,5 +1,5 @@
 import { DEFAULT_MODE, POLICY_SUMMARY } from "./lib/policies.js";
-import { ruleIdFor } from "./lib/rules.js";
+import { normalizeHostForRule, ruleIdFor } from "./lib/rules.js";
 
 const els = {
   origin: document.getElementById("origin"),
@@ -33,7 +33,8 @@ async function activeTabContext() {
     return null;
   }
   if (!/^https?:$/.test(url.protocol) || !url.hostname) return null;
-  return { host: url.hostname, tabId: tab.id };
+  // Fold to eTLD+1 so subdomains resolve to the same stored policy/rule.
+  return { host: normalizeHostForRule(url.hostname), tabId: tab.id };
 }
 
 function render(mode) {
@@ -84,7 +85,7 @@ function renderExceptions(list) {
   els.excList.innerHTML = (list ?? [])
     .map(
       (o) =>
-        `<li>${o}<button type="button" data-origin="${o}" title="Remove">×</button></li>`,
+        `<li>${escapeHtml(o)}<button type="button" data-origin="${escapeHtml(o)}" title="Remove">×</button></li>`,
     )
     .join("");
 }

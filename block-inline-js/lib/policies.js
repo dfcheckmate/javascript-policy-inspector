@@ -4,6 +4,20 @@
  * A mode maps to an appended Content-Security-Policy response header.
  * `observe` intentionally has no policy: scripts run untouched while the
  * observer content script records what loads.
+ *
+ * SCOPE (deliberate choices, not omissions):
+ * - We gate script EXECUTION, not data flow. `connect-src` is unset, so
+ *   XHR/fetch/WebSocket are unrestricted and a same-origin script can still
+ *   exfiltrate cross-origin (subject to CORS). Tracking that is out of scope.
+ * - `worker-src`/`child-src` are unset and fall back to `script-src`. In
+ *   NO_SCRIPTS (`script-src 'none'`) Web Workers are therefore implicitly
+ *   blocked; in FIRST_PARTY_ONLY same-origin workers are allowed. Intentional.
+ * - `style-src` and `form-action` are unset: inline styles still work
+ *   (fine for script-blocking) and forms may submit anywhere — the next
+ *   directive to add if the extension grows beyond script control.
+ * - `script-src-attr` is only honored by Chrome 111+ / Firefox 118+. Older
+ *   engines ignore it and fall back to `script-src`, so (lacking
+ *   'unsafe-inline') handlers are still blocked — a conservative failure.
  */
 
 export const MODES = Object.freeze({
@@ -49,7 +63,11 @@ export function isMode(value) {
 /** Default mode for hosts with no stored preference. */
 export const DEFAULT_MODE = MODES.OBSERVE;
 
-const SHA256_RE = /^sha256-[A-Za-z0-9+/]+={0,2}$/;
+// SHA-256 digest is 32 bytes → 44 base64 chars (plus up to 2 '=') when
+// unpadded/padded. Requiring a near-full body rejects truncated tokens early
+// (a short hash can never match any script) so composePolicy doesn't emit a
+// dead source and the UI can report a clear error.
+const SHA256_RE = /^sha256-[A-Za-z0-9+/]{40,}={0,2}$/;
 
 /**
  * Composes the CSP for a mode plus optional per-site allowances.

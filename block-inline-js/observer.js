@@ -77,8 +77,12 @@
         reason: null,
       });
     } else {
-      const text = (el.textContent ?? "").trim();
-      const hash = await hashPayload(text);
+      // Hash the RAW textContent — browsers compute the CSP hash over the
+      // exact text (including leading/trailing whitespace and indentation),
+      // so trimming here would yield a token that never matches. Only the
+      // displayed snippet is collapsed for readability.
+      const raw = el.textContent ?? "";
+      const hash = await hashPayload(raw);
       push({
         kind: "inline-script",
         url: null,
@@ -87,7 +91,7 @@
         action: "observed",
         reason: null,
         hash,
-        snippet: text.slice(0, 200),
+        snippet: raw.replace(/\s+/g, " ").trim().slice(0, 200),
       });
     }
   }
@@ -103,7 +107,8 @@
 
   async function enrichHandler(attr, el) {
     const value = attr.value ?? "";
-    const hash = await hashPayload(value.trim());
+    // Hash the RAW attribute value for the same reason as inline scripts.
+    const hash = await hashPayload(value);
     push({
       kind: "inline-handler",
       url: null,
@@ -141,6 +146,11 @@
 
   // Ground truth for anything the active policy blocks (inline scripts,
   // inline handlers, eval()/new Function(), third-party scripts).
+  // Coverage caveat: eval() fires securitypolicyviolation only in
+  // Chrome 111+ / Firefox 118+; older Chrome and Safari block eval()
+  // silently without an event. The popup Activity therefore can't claim
+  // complete eval() coverage on those engines — a browser limitation,
+  // not fixable from a content script.
   window.addEventListener("securitypolicyviolation", (e) => {
     push({
       kind: "csp-violation",
