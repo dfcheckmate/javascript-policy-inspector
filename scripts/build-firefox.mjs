@@ -1,8 +1,11 @@
 /**
- * Produces a self-contained Firefox-ready build at dist-firefox/.
+ * Produces two self-contained, clearly-labelled build outputs:
+ *   - dist-edge/     Chrome / Edge (manifest uses "service_worker" + module SW)
+ *   - dist-firefox/  Firefox (manifest uses "background.scripts", bundled SW)
  *
- * The folder contains a single manifest.json (Firefox version) and no
- * Chrome-specific files, so "Load Temporary Add-on" works unambiguously.
+ * Each folder contains exactly ONE manifest.json suited to its browser and
+ * none of the other's manifests, so you can copy the whole folder for the
+ * matching browser without ever loading the wrong manifest file.
  *
  * Usage:  node scripts/build-firefox.mjs
  *   or:   yarn build:firefox
@@ -11,6 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const srcDir = path.resolve("block-inline-js");
+const distDevDir = path.resolve("dist-edge");
 const distDir = path.resolve("dist-firefox");
 
 // ---------------------------------------------------------------------------
@@ -55,36 +59,42 @@ function inline(filePath) {
 inline(path.join(srcDir, "service-worker.js"));
 
 // ---------------------------------------------------------------------------
-// 2. Write dist-firefox/  (manifest.json = Firefox version)
+// 2. Write the per-browser distributions
 // ---------------------------------------------------------------------------
 
-fs.rmSync(distDir, { recursive: true, force: true });
-fs.mkdirSync(distDir, { recursive: true });
-
-fs.writeFileSync(
-  path.join(distDir, "service-worker.bundled.js"),
-  chunks.join("\n"),
-);
-
-// Copy all extension files except Chrome-only manifests and the build output
-const skip = new Set([
+// Files never used by ANY browser dist. Per-browser SW files are handled
+// explicitly below (the bundled SW is Firefox-only, the module SW Edge-only).
+const sharedSkip = new Set([
   "manifest.json",
   "manifest.firefox.json",
   "service-worker.bundled.js",
 ]);
 
-for (const entry of fs.readdirSync(srcDir)) {
-  if (skip.has(entry)) continue;
-  const src = path.join(srcDir, entry);
-  const dst = path.join(distDir, entry);
-  if (fs.statSync(src).isDirectory()) {
-    fs.cpSync(src, dst, { recursive: true });
-  } else {
-    fs.copyFileSync(src, dst);
+function emitDist(dir, extraSkip = []) {
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+
+  const skip = new Set([...sharedSkip, ...extraSkip]);
+  for (const entry of fs.readdirSync(srcDir)) {
+    if (skip.has(entry)) continue;
+    const src = path.join(srcDir, entry);
+    const dst = path.join(dir, entry);
+    if (fs.statSync(src).isDirectory()) {
+      fs.cpSync(src, dst, { recursive: true });
+    } else {
+      fs.copyFileSync(src, dst);
+    }
   }
 }
 
-// Write the Firefox manifest AS manifest.json (the only one Firefox will see)
+// --- Firefox (background.scripts + bundled single-file SW) ---
+// Drop the module SW (service-worker.js); write the bundled one explicitly.
+emitDist(distDir, ["service-worker.js"]);
+fs.writeFileSync(
+  path.join(distDir, "service-worker.bundled.js"),
+  chunks.join("\n"),
+);
+
 const firefoxManifest = JSON.parse(
   fs.readFileSync(path.join(srcDir, "manifest.firefox.json"), "utf8"),
 );
@@ -93,9 +103,25 @@ fs.writeFileSync(
   JSON.stringify(firefoxManifest, null, 2) + "\n",
 );
 
-const size = fs
-  .readdirSync(distDir)
-  .reduce((s, f) => s + fs.statSync(path.join(distDir, f)).size, 0);
+// --- Chrome / Edge (service_worker + ES-module SW + lib/ imports) ---
+// Keep service-worker.js and lib/; drop the bundled SW + tests dir.
+emitDist(distDevDir, ["service-worker.bundled.js", "tests"]);
+
+const chromeManifest = JSON.parse(
+  fs.readFileSync(path.join(srcDir, "manifest.json"), "utf8"),
+);
+fs.writeFileSync(
+  path.join(distDevDir, "manifest.json"),
+  JSON.stringify(chromeManifest, null, 2) + "\n",
+);
+
+const size = (dir) =>
+  fs
+    .readdirSync(dir)
+    .reduce((s, f) => s + fs.statSync(path.join(dir, f)).size, 0);
 console.log(
-  `✓ dist-firefox/ ready  (${Object.keys(firefoxManifest).length} manifest keys, ${size} bytes total)`,
+  `✓ dist-edge/ ready     (${Object.keys(chromeManifest).length} manifest keys, ${size(distDevDir)} bytes total)`,
+);
+console.log(
+  `✓ dist-firefox/ ready  (${Object.keys(firefoxManifest).length} manifest keys, ${size(distDir)} bytes total)`,
 );
