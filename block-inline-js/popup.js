@@ -82,12 +82,18 @@ function renderTabOverride(active) {
 }
 
 function renderExceptions(list) {
-  els.excList.innerHTML = (list ?? [])
-    .map(
-      (o) =>
-        `<li>${escapeHtml(o)}<button type="button" data-origin="${escapeHtml(o)}" title="Remove">×</button></li>`,
-    )
-    .join("");
+  els.excList.replaceChildren();
+  for (const o of list ?? []) {
+    const li = document.createElement("li");
+    li.textContent = o;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.origin = o;
+    btn.title = "Remove";
+    btn.textContent = "×";
+    li.append(btn);
+    els.excList.append(li);
+  }
 }
 
 async function refreshUi() {
@@ -240,8 +246,12 @@ function fmtTime(ts) {
 
 function renderInventory(stats) {
   const el = document.getElementById("inventory");
+  el.replaceChildren();
   if (!stats) {
-    el.innerHTML = '<span class="muted">no activity recorded yet</span>';
+    const span = document.createElement("span");
+    span.className = "muted";
+    span.textContent = "no activity recorded yet";
+    el.append(span);
     return;
   }
   const items = [
@@ -252,13 +262,25 @@ function renderInventory(stats) {
     ["csp-violation", "blocked", stats.blocked],
     ["net", "network", stats.netRequests ?? 0],
   ];
-  el.innerHTML = items
-    .map(([view, label, n]) =>
-      n === 0
-        ? `<span class="count"><b>${n}</b>${label}</span>`
-        : `<button type="button" class="count${label === "blocked" ? " hot" : ""}" data-view="${view}"><b>${n}</b>${label}</button>`,
-    )
-    .join("");
+  for (const [view, label, n] of items) {
+    if (n === 0) {
+      const span = document.createElement("span");
+      span.className = "count";
+      const b = document.createElement("b");
+      b.textContent = n;
+      span.append(b, label);
+      el.append(span);
+    } else {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.dataset.view = view;
+      btn.className = `count${label === "blocked" ? " hot" : ""}`;
+      const b = document.createElement("b");
+      b.textContent = n;
+      btn.append(b, label);
+      el.append(btn);
+    }
+  }
 }
 
 /** Dedupes events into rows keyed by their allow-identity. */
@@ -298,6 +320,36 @@ function detailRows(view, events) {
   });
 }
 
+function appendDetailRow(el, { cls, label, badgeValue, allowed, allowKind, allowValue }) {
+  const li = document.createElement("li");
+  if (cls) li.className = cls;
+  const labelSpan = document.createElement("span");
+  labelSpan.className = "label";
+  labelSpan.title = label;
+  labelSpan.textContent = label;
+  li.append(labelSpan);
+  if (badgeValue) {
+    const badgeSpan = document.createElement("span");
+    badgeSpan.className = "badge";
+    badgeSpan.textContent = badgeValue;
+    li.append(badgeSpan);
+  }
+  if (allowed) {
+    const allowedSpan = document.createElement("span");
+    allowedSpan.className = "badge";
+    allowedSpan.textContent = "allowed";
+    li.append(allowedSpan);
+  } else if (allowKind !== null) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.kind = allowKind;
+    btn.dataset.value = allowValue;
+    btn.textContent = "Allow";
+    li.append(btn);
+  }
+  el.append(li);
+}
+
 function renderDetail(view, events, inlineAllows, exceptions) {
   const el = document.getElementById("detail");
   const allowedSet = new Set([
@@ -305,13 +357,16 @@ function renderDetail(view, events, inlineAllows, exceptions) {
     ...(inlineAllows?.attrs ?? []),
   ]);
   const excSet = new Set(exceptions ?? []);
+  el.replaceChildren();
   if (!view || !Array.isArray(events)) {
-    el.innerHTML = "";
     return;
   }
   const rows = detailRows(view, events);
   if (rows.length === 0) {
-    el.innerHTML = '<li class="muted">nothing in this category</li>';
+    const li = document.createElement("li");
+    li.className = "muted";
+    li.textContent = "nothing in this category";
+    el.append(li);
     return;
   }
   if (view === "net") {
@@ -319,55 +374,60 @@ function renderDetail(view, events, inlineAllows, exceptions) {
     // Allow action (adding the request's origin to the site exceptions) is
     // meaningful solely for script-type rows; every other type stays
     // observation-only.
-    el.innerHTML = rows
-      .map((row) => {
-        const badge =
-          `${row.type ?? ""}${row.status ? ` · ${row.status}` : " · …"}` +
-          (row.count > 1 ? ` · ×${row.count}` : "");
-        const cls = /ERR|FAILED/.test(row.status ?? "") ? ' class="bad"' : "";
-        const title = escapeHtml(`${row.method} ${row.url}`);
-        let button = "";
-        if (row.type === "script") {
-          const origin = originOf(row.url);
-          if (origin) {
-            const already = excSet.has(origin);
-            button = already
-              ? '<span class="badge">allowed</span>'
-              : `<button type="button" data-kind="origin" data-value="${escapeHtml(origin)}">Allow</button>`;
+    for (const row of rows) {
+      const badge =
+        `${row.type ?? ""}${row.status ? ` · ${row.status}` : " · …"}` +
+        (row.count > 1 ? ` · ×${row.count}` : "");
+      const isBad = /ERR|FAILED/.test(row.status ?? "");
+      const title = `${row.method} ${row.url}`;
+      let allowKind = null;
+      let allowValue = null;
+      if (row.type === "script") {
+        const origin = originOf(row.url);
+        if (origin) {
+          if (excSet.has(origin)) {
+            allowKind = "";
+          } else {
+            allowKind = "origin";
+            allowValue = origin;
           }
         }
-        return `<li${cls}><span class="label" title="${title}">${title}</span><span class="badge">${escapeHtml(badge)}</span>${button}</li>`;
-      })
-      .join("");
+      }
+      appendDetailRow(el, {
+        cls: isBad ? "bad" : null,
+        label: title,
+        badgeValue: badge,
+        allowed: allowKind === "",
+        allowKind: allowKind === "" ? null : allowKind,
+        allowValue,
+      });
+    }
     return;
   }
-  el.innerHTML = rows
-    .map((row) => {
-      const full =
-        row.url ?? row.snippet ?? row.reason ?? "(unknown)";
-      const label = escapeHtml(full);
-      const badge = row.count > 1 ? `×${row.count}` : "";
-      let button = "";
-      if (row.action) {
-        const alreadyAllowed =
-          row.action.kind === "origin"
-            ? false
-            : allowedSet.has(row.action.value);
-        button = alreadyAllowed
-          ? '<span class="badge">allowed</span>'
-          : `<button type="button" data-kind="${row.action.kind}" data-value="${row.action.value}">Allow</button>`;
+  for (const row of rows) {
+    const full = row.url ?? row.snippet ?? row.reason ?? "(unknown)";
+    const badge = row.count > 1 ? `×${row.count}` : "";
+    let allowKind = null;
+    let allowValue = null;
+    if (row.action) {
+      const alreadyAllowed =
+        row.action.kind === "origin" ? false : allowedSet.has(row.action.value);
+      if (alreadyAllowed) {
+        allowKind = "";
+      } else {
+        allowKind = row.action.kind;
+        allowValue = row.action.value;
       }
-      return `<li><span class="label" title="${label}">${escapeHtml(label)}</span><span class="badge">${badge}</span>${button}</li>`;
-    })
-    .join("");
-}
-
-function escapeHtml(text) {
-  return String(text)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
+    }
+    appendDetailRow(el, {
+      cls: null,
+      label: full,
+      badgeValue: badge,
+      allowed: allowKind === "",
+      allowKind: allowKind === "" ? null : allowKind,
+      allowValue,
+    });
+  }
 }
 
 /** @param {string} url @returns {string | null} scheme://host[:port] */
@@ -422,21 +482,32 @@ document.getElementById("activity").addEventListener("click", (event) => {
 
 function renderActivity(events) {
   const list = document.getElementById("activity");
+  list.replaceChildren();
   if (!Array.isArray(events) || events.length === 0) {
-    list.innerHTML = '<li class="muted">nothing recorded yet</li>';
+    const li = document.createElement("li");
+    li.className = "muted";
+    li.textContent = "nothing recorded yet";
+    list.append(li);
     return;
   }
   const recent = events.slice(-8).reverse();
-  list.innerHTML = recent
-    .map((e) => {
-      const what =
-        e.kind === "csp-violation"
-          ? e.reason ?? "violation"
-          : `${KIND_LABELS[e.kind] ?? e.kind}${e.url ? `: ${e.url}` : ""}`;
-      const cls = e.action === "blocked" ? "blocked" : "";
-      return `<li class="${cls}" title="${escapeHtml(what)}"><time>${fmtTime(e.ts)}</time> <span class="line">${escapeHtml(what)}</span></li>`;
-    })
-    .join("");
+  for (const e of recent) {
+    const what =
+      e.kind === "csp-violation"
+        ? e.reason ?? "violation"
+        : `${KIND_LABELS[e.kind] ?? e.kind}${e.url ? `: ${e.url}` : ""}`;
+    const li = document.createElement("li");
+    if (e.action === "blocked") li.className = "blocked";
+    li.title = what;
+    const time = document.createElement("time");
+    time.textContent = fmtTime(e.ts);
+    const rawText = document.createTextNode(" ");
+    const line = document.createElement("span");
+    line.className = "line";
+    line.textContent = what;
+    li.append(time, rawText, line);
+    list.append(li);
+  }
 }
 
 async function loadActivity() {

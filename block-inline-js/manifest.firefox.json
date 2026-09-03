@@ -14,7 +14,10 @@
   "host_permissions": ["*://*/*"],
   "browser_specific_settings": {
     "gecko": {
-      "id": "javascript-policy-inspector@akamai"
+      "id": "javascript-policy-inspector@akamai",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
     }
   },
   "background": {
