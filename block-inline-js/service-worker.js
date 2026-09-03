@@ -278,6 +278,7 @@ async function ingestEvents(tabId, incoming) {
     [key]: merged,
     [statsKey(tabId)]: computeStats(merged),
   });
+  await refreshBadge();
 }
 
 // ---------------------------------------------------------------------------
@@ -456,19 +457,89 @@ async function syncRules() {
         addRules,
       });
     }
-    await refreshBadge(effectiveHosts.length);
+    await refreshBadge();
   } catch (err) {
     console.error("[policy-inspector] syncRules failed:", err);
   }
 }
 
-async function refreshBadge(enforcedCount) {
-  await chrome.action.setBadgeBackgroundColor({ color: BADGE_COLOR });
+/** Set the toolbar badge text + colour; empty text clears the badge. */
+async function setBadge(text, color) {
+  await chrome.action.setBadgeBackgroundColor({ color });
   await chrome.action.setBadgeTextColor({ color: "#ffffff" });
-  await chrome.action.setBadgeText({
-    text: enforcedCount > 0 ? String(enforcedCount) : "",
-  });
+  await chrome.action.setBadgeText({ text });
 }
+
+/**
+ * Contextual toolbar badge for the ACTIVE tab:
+ *  - override/paused host  → amber, so an unprotected site is never forgotten
+ *  - enforced (firstParty/noScripts) → red with the blocked count when the
+ *    policy actually stopped something, else empty
+ *  - observe / non-http    → empty (neutral)
+ * This replaces the old "global enforced host count"; the per-tab blocked count
+ * (stats.blocked) is the signal the user actually needs at a glance.
+ */
+async function refreshBadge() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || typeof tab.id !== "number") return;
+    const tabId = tab.id;
+
+    const host = hostForUrl(tab.url);
+    if (!host) {
+      await setBadge("", BADGE_COLOR);
+      return;
+    }
+    const [modes, paused, overrides] = await Promise.all([
+      getSiteModes(),
+      getPaused(),
+      getOverrideTabs(),
+    ]);
+    const key = canon(host);
+    const mode = modes[key] ?? DEFAULT_MODE;
+    const isPaused = paused[key] != null;
+    const isOverride = overrides.has(tabId);
+
+    const data = await chrome.storage.session.get(statsKey(tabId));
+    const blocked = computeStats(data[statsKey(tabId)] ?? []).blocked;
+
+    if (isPaused || isOverride) {
+      // Amber when the site is unprotected so the user isn't misled into
+      // thinking hardening is on. "\u22C5" is a middle dot (non-emoji).
+      await setBadge(blocked > 0 ? String(blocked) : "\u22C5", "#b45309");
+      return;
+    }
+    if (mode === MODES.OBSERVE) {
+      await setBadge("", BADGE_COLOR);
+      return;
+    }
+    if (blocked > 0) {
+      await setBadge(String(blocked), "#b91c1c");
+    } else {
+      await setBadge("", BADGE_COLOR);
+    }
+  } catch {
+    // tab/store teardown races are harmless
+  }
+}
+
+/** @param {string | undefined} url @returns {string | null} */
+function hostForUrl(url) {
+  if (!url) return null;
+  let host;
+  try {
+    host = normalizeHostForRule(new URL(url).hostname);
+  } catch {
+    return null;
+  }
+  return host || null;
+}
+
+// Keep the contextual badge in sync with tab changes and policy state.
+chrome.tabs.onActivated.addListener(() => refreshBadge());
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
+  if (changeInfo.status === "loading" || changeInfo.url !== undefined) refreshBadge();
+});
 
 /** @param {string} host @param {string} mode */
 async function setSiteMode(host, mode) {
@@ -485,15 +556,16 @@ async function setSiteMode(host, mode) {
 // temporary controls
 // ---------------------------------------------------------------------------
 
-/** Pauses enforcement for `host` for PAUSE_MS; resumes automatically. */
-async function pauseHost(host) {
+/** Pauses enforcement for `host` for `ms`; resumes automatically. */
+async function pauseHost(host, ms) {
   const paused = await getPaused();
   const key = canon(host);
-  paused[key] = Date.now() + PAUSE_MS;
+  const until = Date.now() + ms;
+  paused[key] = until;
   await chrome.storage.local.set({ [PAUSED_KEY]: paused });
-  await chrome.alarms.create(`resume:${key}`, { when: paused[key] });
+  await chrome.alarms.create(`resume:${key}`, { when: until });
   await syncRules();
-  return { until: paused[key] };
+  return { until };
 }
 
 async function resumeHost(host) {
@@ -605,6 +677,7 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
     netKey(tabId),
   ]);
   await clearTabOverride(tabId);
+  await refreshBadge();
 });
 
 /**
@@ -674,9 +747,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         });
         break;
       }
-      case "pause-host":
-        sendResponse(await pauseHost(msg.host));
+      case "pause-host": {
+        const ms =
+          typeof msg.ms === "number" && Number.isFinite(msg.ms) && msg.ms > 0
+            ? msg.ms
+            : PAUSE_MS;
+        sendResponse(await pauseHost(msg.host, ms));
         break;
+      }
       case "resume-host":
         await resumeHost(msg.host);
         sendResponse({ ok: true });
