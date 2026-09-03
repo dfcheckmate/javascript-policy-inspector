@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JavaScript Policy Inspector",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Per-site JavaScript control: monitor, allow first-party, or block entirely. See what loads, allow only what you trust.",
   "icons": {
     "16": "icons/icon-16.png",
@@ -10,11 +10,12 @@
     "64": "icons/icon-64.png",
     "128": "icons/icon-128.png"
   },
-  "permissions": ["storage", "tabs", "alarms", "declarativeNetRequest", "webRequest"],
+  "permissions": ["storage", "tabs", "alarms", "declarativeNetRequest", "webRequest", "webNavigation"],
   "host_permissions": ["*://*/*"],
   "browser_specific_settings": {
     "gecko": {
       "id": "javascript-policy-inspector@akamai",
+      "strict_min_version": "142.0",
       "data_collection_permissions": {
         "required": ["none"]
       }
@@ -28,7 +29,8 @@
       "matches": ["http://*/*", "https://*/*"],
       "js": ["observer.js"],
       "run_at": "document_start",
-      "all_frames": true
+      "all_frames": true,
+      "match_about_blank": true
     }
   ],
   "action": {
