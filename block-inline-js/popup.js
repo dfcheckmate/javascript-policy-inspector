@@ -443,7 +443,9 @@ async function showSource(rawText, url) {
     try {
       const resp = await fetch(url, { credentials: "omit" });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      text = await resp.text();
+      const buf = await resp.arrayBuffer();
+      if (buf.byteLength > 1024 * 1024) throw new Error("Source exceeds 1MB limit");
+      text = new TextDecoder().decode(buf);
     } catch (err) {
       els.sourceCode.textContent = `Failed to load source: ${err.message}`;
       els.sourceView.hidden = false;
