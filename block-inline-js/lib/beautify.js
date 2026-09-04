@@ -148,7 +148,7 @@ function isRegexStart(toks) {
   const prev = lastNonWs(toks);
   if (!prev) return true;
   if (prev.kind === "ident" || prev.kind === "num" || prev.kind === "str" || prev.kind === "tmpl" || prev.kind === "regex") return false;
-  if (/[)\}\]"`]/.test(prev.text)) return false;
+  if (/[)}\]"`]/.test(prev.text)) return false;
   return true;
 }
 
@@ -163,11 +163,11 @@ function lastNonWs(toks) {
 // emitter — rebuild formatted text from tokens
 // ---------------------------------------------------------------------------
 
-const PRE_GLUE = /^[.;,)\]}]+$/; // no space before
-const POST_GLUE = /^[([{]+$/; // no space after
-const OPERATOR = /^[=+\-*\/%<>&|^!?]+$/;
-// no space after these characters before a word/operand
-const NO_SPACE_BEFORE_WORD_AFTER = /^[(\[{.]$/;
+const PRE_GLUE = new Set([".", ";", ",", ")", "]", "}"]);
+const POST_GLUE = new Set(["(", "[", "{"]);
+const OPERATOR = /^[=+\-*/%<>&|^!?]+$/;
+// no space before a word/operand after these characters
+const NO_SPACE_BEFORE_WORD_AFTER = new Set([".", "(", "[", "{"]);
 // bare control keywords get a space before "(" in normal style ("if (a)")
 const CONTROL_KEYWORDS = new Set(["if", "for", "while", "switch", "catch", "with"]);
 
@@ -185,14 +185,6 @@ export function beautify(src) {
   let line = ""; // pending text for the current line (no indentation prefix)
   const INDENT = "  ";
 
-  const emit = ({ text, newline }) => {
-    if (newline) {
-      const trimmed = line.trim();
-      if (trimmed !== "") out.push(INDENT + trimmed);
-      line = "";
-    }
-    line += text;
-  };
   const flushLine = () => {
     const trimmed = line.trim();
     if (trimmed !== "") out.push(INDENT.repeat(indent) + trimmed);
@@ -293,9 +285,9 @@ export function beautify(src) {
       }
       // generic punctuation
       if (line === "") { line = p; }
-      else if (PRE_GLUE.test(p)) { line += p; }
+      else if (PRE_GLUE.has(p)) { line += p; }
       else if (line[line.length - 1] === " ") { line += p; }
-      else if (POST_GLUE.test(p)) { line += p; }
+      else if (POST_GLUE.has(p)) { line += p; }
       else { line += " " + p; }
       continue;
     }
@@ -318,13 +310,13 @@ function needsSpace(line, tok) {
   if (line === "") return false;
   const last = line[line.length - 1];
   if (tok.kind === "punct") {
-    if (PRE_GLUE.test(tok.text)) return false;
+    if (PRE_GLUE.has(tok.text)) return false;
     return last !== " ";
   }
   // word/operand: keep spacing after "(", "[", "{", "." but add it after
   // spaces, operators, ":" and ",".
   if (last === " ") return false;
-  if (NO_SPACE_BEFORE_WORD_AFTER.test(last)) return false;
+  if (NO_SPACE_BEFORE_WORD_AFTER.has(last)) return false;
   return true;
 }
 

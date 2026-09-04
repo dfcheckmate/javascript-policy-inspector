@@ -1,5 +1,7 @@
-import { DEFAULT_MODE, POLICY_SUMMARY } from "./lib/policies.js";
+import { DEFAULT_MODE, POLICY_SUMMARY, composeHeader } from "./lib/policies.js";
 import { normalizeHostForRule, ruleIdFor } from "./lib/rules.js";
+import { beautify } from "./lib/beautify.js";
+import { highlight } from "./lib/highlight.js";
 
 const els = {
   origin: document.getElementById("origin"),
@@ -16,6 +18,10 @@ const els = {
   exportBtn: document.getElementById("export-btn"),
   importBtn: document.getElementById("import-btn"),
   importFile: document.getElementById("import-file"),
+  copyCsp: document.getElementById("copy-csp"),
+  sourceView: document.getElementById("source-view"),
+  sourceCode: document.getElementById("source-code"),
+  relax: () => document.querySelectorAll("[data-pause-min]"),
 };
 
 /** @type {string | null} */
@@ -70,7 +76,7 @@ function fmtClock(ts) {
 function renderPaused(pausedUntil) {
   const active = typeof pausedUntil === "number" && pausedUntil > Date.now();
   els.pause.classList.toggle("active", active);
-  els.pause.textContent = active ? "Resume now" : "Pause 10 min";
+  els.pause.textContent = active ? "Resume now" : "Pause";
   els.pauseState.textContent = active
     ? `Policy paused until ${fmtClock(pausedUntil)}`
     : "";
@@ -149,6 +155,50 @@ els.pause.addEventListener("click", async () => {
     active ? { type: "resume-host", host } : { type: "pause-host", host },
   );
   await refreshUi();
+});
+
+// Relax presets: pause for N minutes (host-scoped, auto-resume).
+for (const btn of els.relax()) {
+  btn.addEventListener("click", async () => {
+    if (!host) return;
+    const ms = Number(btn.dataset.pauseMin) * 60 * 1000;
+    await chrome.runtime.sendMessage({ type: "pause-host", host, ms });
+    await refreshUi();
+  });
+}
+
+// Copy a deployable CSP header for this host (built client-side, offline).
+els.copyCsp.addEventListener("click", async () => {
+  if (!host) return;
+  const state = await chrome.runtime.sendMessage({
+    type: "get-state",
+    host,
+    tabId,
+  });
+  if (state?.error) {
+    els.pauseState.textContent = state.error;
+    return;
+  }
+  const header = composeHeader(state.mode ?? DEFAULT_MODE, {
+    origins: state.exceptions ?? [],
+    scriptHashes: state.inlineAllows?.scripts ?? [],
+    attrHashes: state.inlineAllows?.attrs ?? [],
+  });
+  if (header == null) {
+    els.pauseState.textContent = "No CSP to copy (Observe mode)";
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(header);
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = header;
+    document.body.append(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+  els.pauseState.textContent = "CSP header copied to clipboard";
 });
 
 els.allowTab.addEventListener("click", async () => {
@@ -320,7 +370,10 @@ function detailRows(view, events) {
   });
 }
 
-function appendDetailRow(el, { cls, label, badgeValue, allowed, allowKind, allowValue }) {
+function appendDetailRow(
+  el,
+  { cls, label, badgeValue, allowed, allowKind, allowValue, source, sourceUrl },
+) {
   const li = document.createElement("li");
   if (cls) li.className = cls;
   const labelSpan = document.createElement("span");
@@ -333,6 +386,26 @@ function appendDetailRow(el, { cls, label, badgeValue, allowed, allowKind, allow
     badgeSpan.className = "badge";
     badgeSpan.textContent = badgeValue;
     li.append(badgeSpan);
+  }
+  // Inline preview or "view external source" affordance.
+  if (source != null) {
+    const details = document.createElement("details");
+    details.className = "preview";
+    const sum = document.createElement("summary");
+    sum.textContent = "preview";
+    details.append(sum);
+    const pre = document.createElement("pre");
+    pre.className = "code";
+    const fmt = beautify(source) || source;
+    for (const span of renderCodeSpans(fmt)) pre.append(span);
+    details.append(pre);
+    li.append(details);
+  } else if (sourceUrl) {
+    const view = document.createElement("button");
+    view.type = "button";
+    view.dataset.viewSource = sourceUrl;
+    view.textContent = "View";
+    li.append(view);
   }
   if (allowed) {
     const allowedSpan = document.createElement("span");
@@ -348,6 +421,52 @@ function appendDetailRow(el, { cls, label, badgeValue, allowed, allowKind, allow
     li.append(btn);
   }
   el.append(li);
+}
+
+/** Renders formatted code into safe highlighted DOM spans. */
+function renderCodeSpans(src) {
+  const spans = [];
+  for (const tok of highlight(src)) {
+    const span = document.createElement("span");
+    if (tok.cls) span.className = `tok-${tok.cls}`;
+    span.textContent = tok.text;
+    spans.push(span);
+  }
+  return spans;
+}
+
+/** Populates the shared source panel; fetches external scripts (user-initiated). */
+async function showSource(rawText, url) {
+  let text = rawText;
+  if (text == null && url) {
+    els.sourceCode.textContent = "loading…";
+    try {
+      const resp = await fetch(url, { credentials: "omit" });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      text = await resp.text();
+    } catch (err) {
+      els.sourceCode.textContent = `Failed to load source: ${err.message}`;
+      els.sourceView.hidden = false;
+      return;
+    }
+  }
+  if (text == null) {
+    els.sourceCode.textContent = "No source available.";
+    els.sourceView.hidden = false;
+    return;
+  }
+  const fmt = beautify(text) || text;
+  els.sourceCode.replaceChildren();
+  const pre = els.sourceCode;
+  pre.append(...renderCodeSpans(fmt));
+  els.sourceView.hidden = false;
+  if (url) {
+    const label = document.createElement("div");
+    label.className = "src-url";
+    label.textContent = url;
+    pre.before(label);
+  }
+  els.sourceView.open = true;
 }
 
 function renderDetail(view, events, inlineAllows, exceptions) {
@@ -400,6 +519,7 @@ function renderDetail(view, events, inlineAllows, exceptions) {
         allowed: allowKind === "",
         allowKind: allowKind === "" ? null : allowKind,
         allowValue,
+        sourceUrl: row.type === "script" ? row.url : null,
       });
     }
     return;
@@ -419,6 +539,9 @@ function renderDetail(view, events, inlineAllows, exceptions) {
         allowValue = row.action.value;
       }
     }
+    // Inline rows (script/handler) expose their raw body for preview; external
+    // script rows (first/third) offer a "View" that fetches the source.
+    const isInline = view === "inline-script" || view === "inline-handler";
     appendDetailRow(el, {
       cls: null,
       label: full,
@@ -426,6 +549,8 @@ function renderDetail(view, events, inlineAllows, exceptions) {
       allowed: allowKind === "",
       allowKind: allowKind === "" ? null : allowKind,
       allowValue,
+      source: isInline ? row.raw ?? null : null,
+      sourceUrl: row.url && !isInline ? row.url : null,
     });
   }
 }
@@ -456,6 +581,12 @@ document.getElementById("inventory").addEventListener("click", (event) => {
 });
 
 document.getElementById("detail").addEventListener("click", async (event) => {
+  // View-source button: fetch + display an external script body.
+  const viewBtn = event.target.closest("button[data-view-source]");
+  if (viewBtn) {
+    await showSource(null, viewBtn.dataset.viewSource);
+    return;
+  }
   // Allow buttons take precedence; row clicks expand/collapse.
   const btn = event.target.closest("button[data-kind]");
   if (btn) {

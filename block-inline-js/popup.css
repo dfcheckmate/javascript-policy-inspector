@@ -270,3 +270,105 @@ button.active {
   color: #b91c1c;
   font-weight: 600;
 }
+
+.actions {
+  grid-template-columns: 1fr 1fr;
+}
+
+.actions #reload {
+  grid-column: 1 / -1;
+}
+
+.actions #copy-csp,
+.actions #allow-tab {
+  font-size: 11px;
+}
+
+.relax {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 10px;
+}
+
+.relax .relax-label {
+  font-size: 11px;
+  color: #737373;
+  margin-right: 2px;
+  white-space: nowrap;
+}
+
+.relax button {
+  width: auto;
+  flex: 1;
+  padding: 3px 0;
+  font-size: 11px;
+}
+
+.relax button.active {
+  background: #fef3c7;
+  border-color: #f59e0b;
+}
+
+.detail li .preview {
+  width: 100%;
+  flex-basis: 100%;
+  cursor: default;
+}
+
+.detail li .preview summary {
+  font-size: 11px;
+  color: #737373;
+  cursor: pointer;
+}
+
+.code,
+pre.code {
+  margin: 4px 0;
+  padding: 6px 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  font-family: Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  max-height: 260px;
+  overflow: auto;
+}
+
+#source-view {
+  margin: 0 0 10px;
+  border: 1px solid #d4d4d4;
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+#source-view summary {
+  font-size: 11px;
+  color: #737373;
+  cursor: pointer;
+}
+
+.src-url {
+  font-size: 10px;
+  color: #a3a3a3;
+  font-family: Menlo, Consolas, monospace;
+  word-break: break-all;
+  padding-bottom: 4px;
+}
+
+/* syntax token colours */
+.tok-kw { color: #c792ea; }
+.tok-lit { color: #82aaff; }
+.tok-fn { color: #82aaff; }
+.tok-string { color: #c3e88d; }
+.tok-regex { color: #f78c6c; }
+.tok-comment { color: #64748b; font-style: italic; }
+.tok-num { color: #f78c6c; }
+
+/* allow / view buttons inside detail rows */
+.detail li button[data-view-source] {
+  color: #1d4ed8;
+}

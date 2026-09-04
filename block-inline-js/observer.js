@@ -99,6 +99,7 @@
         action: "observed",
         reason: null,
         hash,
+        raw: raw.slice(0, 8000),
         snippet: raw.replace(/\s+/g, " ").trim().slice(0, 200),
       });
     }
@@ -131,6 +132,7 @@
       handler: attr.name.toLowerCase(),
       target: el.tagName.toLowerCase(),
       hash: hash ? `attr-${hash}` : null,
+      raw: value.slice(0, 4000),
       snippet: `${attr.name.toLowerCase()}="${value.slice(0, 60)}"`,
     });
   }
