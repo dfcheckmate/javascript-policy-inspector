@@ -466,7 +466,6 @@ async function syncRules() {
 /** Set the toolbar badge text + colour; empty text clears the badge. */
 async function setBadge(text, color) {
   await chrome.action.setBadgeBackgroundColor({ color });
-  await chrome.action.setBadgeTextColor({ color: "#ffffff" });
   await chrome.action.setBadgeText({ text });
 }
 

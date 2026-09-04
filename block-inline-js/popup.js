@@ -652,9 +652,11 @@ async function loadActivity() {
   if (res?.error) return;
   lastEvents = res.events ?? [];
   lastNetEvents = res.netEvents ?? [];
-  renderInventory(res.stats);
-  renderActivity(lastEvents);
-  renderDetail(currentView, allEvents(), lastInlineAllows, lastExceptions);
+  requestAnimationFrame(() => {
+    renderInventory(res.stats);
+    renderActivity(lastEvents);
+    renderDetail(currentView, allEvents(), lastInlineAllows, lastExceptions);
+  });
 }
 
 const ctx = await activeTabContext();
