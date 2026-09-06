@@ -6,7 +6,6 @@ import {
   DEFAULT_MODE,
   MODES,
   POLICY_SUMMARY,
-  composeHeader,
   composePolicy,
   isMode,
   normalizeOrigin,
@@ -189,20 +188,4 @@ test("normalizeHostForRule folds common suffixes to 3 labels, else 2", () => {
   assert.equal(normalizeHostForRule("www.bbc.co.uk"), "bbc.co.uk");
   assert.equal(normalizeHostForRule("a.b.example.com"), "example.com");
   assert.equal(normalizeHostForRule("WWW.Example.COM"), "example.com");
-});
-
-test("composeHeader wraps composePolicy in a Content-Security-Policy header", () => {
-  assert.equal(
-    composeHeader(MODES.FIRST_PARTY_ONLY),
-    `Content-Security-Policy: ${composePolicy(MODES.FIRST_PARTY_ONLY)}`,
-  );
-  const withAllow = composeHeader(MODES.FIRST_PARTY_ONLY, {
-    origins: ["https://cdn.example.com"],
-  });
-  assert.ok(withAllow.startsWith("Content-Security-Policy: "));
-  assert.ok(withAllow.includes("https://cdn.example.com"));
-});
-
-test("composeHeader returns null for observe mode", () => {
-  assert.equal(composeHeader(MODES.OBSERVE), null);
 });

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JavaScript Policy Inspector",
-  "version": "0.3.5",
+  "version": "0.3.2",
   "description": "Per-site JavaScript control: monitor, allow first-party, or block entirely. See what loads, allow only what you trust.",
   "minimum_chrome_version": "101",
   "icons": {
@@ -10,7 +10,7 @@
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
   },
-  "permissions": ["storage", "tabs", "alarms", "declarativeNetRequest", "webRequest", "webNavigation"],
+  "permissions": ["storage", "tabs", "alarms", "declarativeNetRequest", "webRequest"],
   "host_permissions": ["*://*/*"],
   "background": {
     "service_worker": "service-worker.js",
@@ -21,8 +21,7 @@
       "matches": ["http://*/*", "https://*/*"],
       "js": ["observer.js"],
       "run_at": "document_start",
-      "all_frames": true,
-      "match_about_blank": true
+      "all_frames": true
     }
   ],
   "action": {

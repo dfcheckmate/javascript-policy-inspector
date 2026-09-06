@@ -15,12 +15,12 @@ const SITE_MODES_KEY = "siteModes";
 const EXCEPTIONS_KEY = "siteExceptions";
 const INLINE_ALLOWS_KEY = "siteInlineAllows";
 const PAUSED_KEY = "pausedUntil";
-const OVERRIDES_KEY = "tabOverrides";
 const BADGE_COLOR = "#b45309";
 const MAX_EVENTS_PER_TAB = 200;
 const MAX_NET_PER_TAB = 300;
 const NET_FLUSH_MS = 400;
 const PAUSE_MS = 10 * 60 * 1000;
+const OVERRIDE_PRIORITY = 1000;
 
 /** @param {number} tabId */
 const eventsKey = (tabId) => `tabEvents:${tabId}`;
@@ -28,6 +28,8 @@ const eventsKey = (tabId) => `tabEvents:${tabId}`;
 const statsKey = (tabId) => `tabStats:${tabId}`;
 /** @param {number} tabId */
 const netKey = (tabId) => `tabNet:${tabId}`;
+/** Tab-scoped CSP-removal overrides live in the reserved band. */
+const tabOverrideId = (tabId) => RULE_BANDS.TAB_OVERRIDE + tabId;
 
 /**
  * @typedef {object} ObsEvent
@@ -57,175 +59,6 @@ const getPaused = () => getStore(PAUSED_KEY);
 
 /** Host storage keys are always stored in canonical (eTLD+1) form. */
 const canon = (host) => normalizeHostForRule(host);
-
-// ---------------------------------------------------------------------------
-// rule-ID allocation (deterministic, collision-free)
-// ---------------------------------------------------------------------------
-
-/**
- * Computes the list of enforced hosts (stored mode != OBSERVE), normalised and
- * de-duplicated, then sorts them so linear-probe ID allocation is identical
- * across every restart and sync — no allocation table needs to be persisted.
- * @returns {{host: string, mode: string}[]} sorted, de-duplicated
- */
-function computeEffectiveHosts(modes) {
-  const byHost = new Map();
-  for (const raw of Object.keys(modes)) {
-    const h = normalizeHostForRule(raw);
-    if (h && modes[normalizeHostForRule(h)] !== MODES.OBSERVE && !byHost.has(h)) {
-      byHost.set(h, modes[h]);
-    }
-  }
-  return [...byHost.entries()]
-    .map(([host, mode]) => ({ host, mode }))
-    .sort((a, b) => (a.host < b.host ? -1 : a.host > b.host ? 1 : 0));
-}
-
-/**
- * Assigns collision-free rule IDs to the given (already sorted) hosts by
- * linear probing inside the site-policy band.
- * @param {{host: string}[]} effectiveHosts sorted hosts
- * @returns {Map<string, number>} host → assigned rule id
- */
-function allocatedRuleIds(effectiveHosts) {
-  const used = new Set();
-  const ids = new Map();
-  for (const { host } of effectiveHosts) {
-    let id = ruleIdFor(host);
-    while (used.has(id)) {
-      id++;
-      if (id >= RULE_BANDS.TAB_OVERRIDE) id = RULE_BANDS.SITE_POLICY;
-    }
-    used.add(id);
-    ids.set(host, id);
-  }
-  return ids;
-}
-
-// ---------------------------------------------------------------------------
-// tab overrides (safe: exempt our rule for a tab, preserve the site's CSP)
-// ---------------------------------------------------------------------------
-
-/**
- * Overridden tab IDs are persisted in storage.session so they survive event-page
- * suspension, but are wiped when the browser session ends. Returns a Set.
- */
-async function getOverrideTabs() {
-  const data = await chrome.storage.session.get(OVERRIDES_KEY);
-  return new Set(data[OVERRIDES_KEY] ?? []);
-}
-
-async function setOverrideTabs(ids) {
-  await chrome.storage.session.set({ [OVERRIDES_KEY]: [...ids] });
-}
-
-/** True when `tabId` is currently excluded from our injected policies. */
-async function isTabOverridden(tabId) {
-  const ids = await getOverrideTabs();
-  return ids.has(tabId);
-}
-
-/**
- * Resolves the enforcement context of `tabId`'s current page, if any.
- * Returns null when the tab has no URL, is not http(s), or its host is in
- * Observe mode (no policy rule to exclude). Otherwise returns the host, its
- * assigned rule id, and its stored allowances so a single rule can be patched.
- * @returns {Promise<{host: string, id: number, mode: string, allows: object} | null>}
- */
-async function hostResolverForTab(tabId) {
-  let tab;
-  try {
-    tab = await chrome.tabs.get(tabId);
-  } catch {
-    return null;
-  }
-  let host;
-  try {
-    host = normalizeHostForRule(new URL(tab.url ?? "").hostname);
-  } catch {
-    return null;
-  }
-  if (!host) return null;
-  const [modes, exceptions, inlineAllows] = await Promise.all([
-    getSiteModes(),
-    getExceptions(),
-    getInlineAllows(),
-  ]);
-  const hostKey = canon(host);
-  if (!isMode(modes[hostKey]) || modes[hostKey] === MODES.OBSERVE) return null;
-  const effective = computeEffectiveHosts({ ...modes, [hostKey]: modes[hostKey] });
-  const id = allocatedRuleIds(effective).get(hostKey);
-  if (id === undefined) return null;
-  return {
-    host: hostKey,
-    id,
-    mode: modes[hostKey],
-    allows: {
-      origins: exceptions[hostKey] ?? [],
-      scriptHashes: inlineAllows[hostKey]?.scripts ?? [],
-      attrHashes: inlineAllows[hostKey]?.attrs ?? [],
-    },
-  };
-}
-
-/**
- * Targeted patch: rebuild only the given host's dynamic rule with the current
- * override registry as excludedTabIds. Called on toggle and on tab close so a
- * single rule changes instead of a full-database reconciliation.
- */
-async function patchHostOverrides(resolver, excludedTabIds) {
-  const rule = buildRule(
-    resolver.host,
-    resolver.mode,
-    resolver.allows,
-    resolver.id,
-    excludedTabIds,
-  );
-  await chrome.declarativeNetRequest.updateDynamicRules({
-    removeRuleIds: [resolver.id],
-    addRules: [rule],
-  });
-}
-
-/**
- * Removes `tabId` from the override registry, then patches the tab's host rule
- * with the reduced (remaining) override set so its excludedTabIds is not stale.
- */
-async function clearTabOverride(tabId) {
-  const ids = await getOverrideTabs();
-  if (!ids.has(tabId)) return;
-  ids.delete(tabId);
-  await setOverrideTabs(ids);
-  const resolver = await hostResolverForTab(tabId);
-  if (resolver) {
-    await patchHostOverrides(resolver, [...ids]);
-  }
-}
-
-/**
- * Toggles the per-tab override. Returns the new active state.
- *
- * Implementation: instead of stripping CSP headers with a high-priority
- * "remove" session rule (which also destroys the site's OWN anti-XSS policy),
- * we exempt the tab via condition.excludedTabIds on our dynamic policy rule.
- * The website's native CSP stays fully intact (least privilege), and only the
- * affected host's rule is patched.
- */
-async function toggleTabOverride(tabId) {
-  const ids = await getOverrideTabs();
-  const isActive = ids.has(tabId);
-  if (isActive) ids.delete(tabId);
-  else ids.add(tabId);
-  await setOverrideTabs(ids);
-
-  const resolver = await hostResolverForTab(tabId);
-  if (resolver) {
-    await patchHostOverrides(resolver, [...ids]);
-  }
-  // Host in Observe/non-http → no policy rule to exempt; the registry entry
-  // still records the user intent and will apply if the host is later enforced.
-  return !isActive;
-}
 
 // ---------------------------------------------------------------------------
 // observer event ingestion (bounded per-tab logs in storage.session)
@@ -278,7 +111,6 @@ async function ingestEvents(tabId, incoming) {
     [key]: merged,
     [statsKey(tabId)]: computeStats(merged),
   });
-  await refreshBadge();
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +224,9 @@ function normalizeRuleList(result) {
   return Array.isArray(result) ? result : (result?.rules ?? []);
 }
 
+const getSessionRulesSafe = async () =>
+  normalizeRuleList(await chrome.declarativeNetRequest.getSessionRules());
+
 // ---------------------------------------------------------------------------
 // policy reconciliation
 // ---------------------------------------------------------------------------
@@ -423,9 +258,16 @@ async function syncRules() {
       // prune happened above only when resuming; persist restored modes
       await chrome.storage.local.set({ [SITE_MODES_KEY]: modes, [PAUSED_KEY]: paused });
     }
-    const effectiveHosts = computeEffectiveHosts(modes);
-    const excludedTabIds = [...(await getOverrideTabs())];
-    const ids = allocatedRuleIds(effectiveHosts);
+    const hosts = Object.keys(modes)
+      .map(normalizeHostForRule)
+      .filter((h) => h && modes[normalizeHostForRule(h)] !== MODES.OBSERVE);
+    const seenHosts = new Set();
+    const effectiveHosts = [];
+    for (const h of hosts) {
+      if (seenHosts.has(h)) continue; // normalized duplicates (subdomains)
+      seenHosts.add(h);
+      effectiveHosts.push(h);
+    }
     const rules = normalizeRuleList(
       await chrome.declarativeNetRequest.getDynamicRules(),
     );
@@ -435,21 +277,30 @@ async function syncRules() {
           r.id >= RULE_BANDS.SITE_POLICY && r.id < RULE_BANDS.TAB_OVERRIDE,
       )
       .map((r) => r.id);
-    // Collision-free: hosts are sorted, then each gets a unique slot via
-    // linear probing inside the site-policy band (see allocatedRuleIds). No
-    // host is ever dropped, so enforcement never silently fails.
-    const addRules = effectiveHosts.map(({ host }) =>
-      buildRule(
-        host,
-        modes[host],
-        {
-          origins: exceptions[host] ?? [],
-          scriptHashes: inlineAllows[host]?.scripts ?? [],
-          attrHashes: inlineAllows[host]?.attrs ?? [],
-        },
-        ids.get(host),
-        excludedTabIds,
-      ),
+    // Deterministic FNV rule ids can collide for large site sets. Detect
+    // and surface any collision instead of silently letting the second
+    // host's rule overwrite the first's (the DNR default on id reuse).
+    const idOwner = new Map();
+    const addHosts = [];
+    for (const h of effectiveHosts) {
+      const id = ruleIdFor(h);
+      const existing = idOwner.get(id);
+      if (existing !== undefined && existing !== h) {
+        console.warn(
+          `[policy-inspector] rule-id collision: "${h}" vs "${existing}" — ` +
+            `skipping "${h}". Normalize host further or adjust the dedicated range.`,
+        );
+        continue;
+      }
+      idOwner.set(id, h);
+      addHosts.push(h);
+    }
+    const addRules = addHosts.map((h) =>
+      buildRule(h, modes[h], {
+        origins: exceptions[h] ?? [],
+        scriptHashes: inlineAllows[h]?.scripts ?? [],
+        attrHashes: inlineAllows[h]?.attrs ?? [],
+      }),
     );
     if (removeRuleIds.length > 0 || addRules.length > 0) {
       await chrome.declarativeNetRequest.updateDynamicRules({
@@ -457,88 +308,19 @@ async function syncRules() {
         addRules,
       });
     }
-    await refreshBadge();
+    await refreshBadge(hosts.length);
   } catch (err) {
     console.error("[policy-inspector] syncRules failed:", err);
   }
 }
 
-/** Set the toolbar badge text + colour; empty text clears the badge. */
-async function setBadge(text, color) {
-  await chrome.action.setBadgeBackgroundColor({ color });
-  await chrome.action.setBadgeText({ text });
+async function refreshBadge(enforcedCount) {
+  await chrome.action.setBadgeBackgroundColor({ color: BADGE_COLOR });
+  await chrome.action.setBadgeTextColor({ color: "#ffffff" });
+  await chrome.action.setBadgeText({
+    text: enforcedCount > 0 ? String(enforcedCount) : "",
+  });
 }
-
-/**
- * Contextual toolbar badge for the ACTIVE tab:
- *  - override/paused host  → amber, so an unprotected site is never forgotten
- *  - enforced (firstParty/noScripts) → red with the blocked count when the
- *    policy actually stopped something, else empty
- *  - observe / non-http    → empty (neutral)
- * This replaces the old "global enforced host count"; the per-tab blocked count
- * (stats.blocked) is the signal the user actually needs at a glance.
- */
-async function refreshBadge() {
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab || typeof tab.id !== "number") return;
-    const tabId = tab.id;
-
-    const host = hostForUrl(tab.url);
-    if (!host) {
-      await setBadge("", BADGE_COLOR);
-      return;
-    }
-    const [modes, paused, overrides] = await Promise.all([
-      getSiteModes(),
-      getPaused(),
-      getOverrideTabs(),
-    ]);
-    const key = canon(host);
-    const mode = modes[key] ?? DEFAULT_MODE;
-    const isPaused = paused[key] != null;
-    const isOverride = overrides.has(tabId);
-
-    const data = await chrome.storage.session.get(statsKey(tabId));
-    const blocked = computeStats(data[statsKey(tabId)] ?? []).blocked;
-
-    if (isPaused || isOverride) {
-      // Amber when the site is unprotected so the user isn't misled into
-      // thinking hardening is on. "\u22C5" is a middle dot (non-emoji).
-      await setBadge(blocked > 0 ? String(blocked) : "\u22C5", "#b45309");
-      return;
-    }
-    if (mode === MODES.OBSERVE) {
-      await setBadge("", BADGE_COLOR);
-      return;
-    }
-    if (blocked > 0) {
-      await setBadge(String(blocked), "#b91c1c");
-    } else {
-      await setBadge("", BADGE_COLOR);
-    }
-  } catch {
-    // tab/store teardown races are harmless
-  }
-}
-
-/** @param {string | undefined} url @returns {string | null} */
-function hostForUrl(url) {
-  if (!url) return null;
-  let host;
-  try {
-    host = normalizeHostForRule(new URL(url).hostname);
-  } catch {
-    return null;
-  }
-  return host || null;
-}
-
-// Keep the contextual badge in sync with tab changes and policy state.
-chrome.tabs.onActivated.addListener(() => refreshBadge());
-chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
-  if (changeInfo.status === "loading" || changeInfo.url !== undefined) refreshBadge();
-});
 
 /** @param {string} host @param {string} mode */
 async function setSiteMode(host, mode) {
@@ -555,16 +337,15 @@ async function setSiteMode(host, mode) {
 // temporary controls
 // ---------------------------------------------------------------------------
 
-/** Pauses enforcement for `host` for `ms`; resumes automatically. */
-async function pauseHost(host, ms) {
+/** Pauses enforcement for `host` for PAUSE_MS; resumes automatically. */
+async function pauseHost(host) {
   const paused = await getPaused();
   const key = canon(host);
-  const until = Date.now() + ms;
-  paused[key] = until;
+  paused[key] = Date.now() + PAUSE_MS;
   await chrome.storage.local.set({ [PAUSED_KEY]: paused });
-  await chrome.alarms.create(`resume:${key}`, { when: until });
+  await chrome.alarms.create(`resume:${key}`, { when: paused[key] });
   await syncRules();
-  return { until };
+  return { until: paused[key] };
 }
 
 async function resumeHost(host) {
@@ -581,6 +362,37 @@ async function resumeHost(host) {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name?.startsWith("resume:")) resumeHost(alarm.name.slice(7));
 });
+
+/** Toggles a per-tab session rule that strips ALL CSP response headers. */
+async function toggleTabOverride(tabId) {
+  const id = tabOverrideId(tabId);
+  const active = (await getSessionRulesSafe()).some((r) => r.id === id);
+  if (active) {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [id],
+    });
+    return false;
+  }
+  await chrome.declarativeNetRequest.updateSessionRules({
+    addRules: [
+      {
+        id,
+        priority: OVERRIDE_PRIORITY,
+        action: {
+          type: "modifyHeaders",
+          responseHeaders: [
+            { header: "Content-Security-Policy", operation: "remove" },
+          ],
+        },
+        condition: {
+          tabIds: [tabId],
+          resourceTypes: ["main_frame", "sub_frame"],
+        },
+      },
+    ],
+  });
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // exceptions (per-host allowed script origins)
@@ -653,30 +465,13 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
     clearTimeout(timer);
     netTimers.delete(tabId);
   }
-  await clearTabOverride(tabId);
-});
-
-/**
- * Cross-site navigation reset. When a tab navigates to a new site (top-level
- * frameId 0), flush the old site's ledger and any temporary override so the
- * inspector never shows phantom scripts from a previously visited origin.
- */
-chrome.webNavigation.onCommitted.addListener(async (details) => {
-  if (details.frameId !== 0) return;
-  const { tabId } = details;
-  netPending.delete(tabId);
-  const timer = netTimers.get(tabId);
-  if (timer !== undefined) {
-    clearTimeout(timer);
-    netTimers.delete(tabId);
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [tabOverrideId(tabId)],
+    });
+  } catch {
+    // session store already gone; nothing to clean
   }
-  await chrome.storage.session.remove([
-    eventsKey(tabId),
-    statsKey(tabId),
-    netKey(tabId),
-  ]);
-  await clearTabOverride(tabId);
-  await refreshBadge();
 });
 
 /**
@@ -713,7 +508,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           inlineAllows: inlineAllows[key] ?? { scripts: [], attrs: [] },
         };
         state.tabOverride =
-          typeof msg.tabId === "number" && (await isTabOverridden(msg.tabId));
+          typeof msg.tabId === "number"
+            ? (await getSessionRulesSafe()).some(
+                (r) => r.id === tabOverrideId(msg.tabId),
+              )
+            : false;
         sendResponse(state);
         break;
       }
@@ -746,14 +545,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         });
         break;
       }
-      case "pause-host": {
-        const ms =
-          typeof msg.ms === "number" && Number.isFinite(msg.ms) && msg.ms > 0
-            ? msg.ms
-            : PAUSE_MS;
-        sendResponse(await pauseHost(msg.host, ms));
+      case "pause-host":
+        sendResponse(await pauseHost(msg.host));
         break;
-      }
       case "resume-host":
         await resumeHost(msg.host);
         sendResponse({ ok: true });

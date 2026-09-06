@@ -101,26 +101,16 @@ export function ruleIdFor(host) {
  * @param {string} host
  * @param {string} mode one of MODES (observe has no CSP and yields no rule)
  * @param {{origins?: string[], scriptHashes?: string[], attrHashes?: string[]}} [allows]
- * @param {number} [explicitId] caller-assigned rule id (collision-free allocation);
- *   defaults to ruleIdFor(host) for backward compatibility / standalone use
- * @param {number[]} [excludedTabIds] tabs to exempt from this rule (safe overrides
- *   that preserve the site's own CSP instead of removing headers)
  * @returns {chrome.declarativeNetRequest.Rule}
  * @throws {Error} unknown mode or a mode without an enforceable policy
  */
-export function buildRule(
-  host,
-  mode,
-  allows = {},
-  explicitId = null,
-  excludedTabIds = [],
-) {
+export function buildRule(host, mode, allows = {}) {
   if (!isMode(mode)) throw new Error(`unknown mode: ${mode}`);
   const value = composePolicy(mode, allows);
   if (!value) throw new Error(`mode "${mode}" has no enforceable CSP`);
   const apex = normalizeHostForRule(host);
-  const rule = {
-    id: explicitId ?? ruleIdFor(apex),
+  return {
+    id: ruleIdFor(apex),
     priority: 1,
     action: {
       type: "modifyHeaders",
@@ -133,10 +123,6 @@ export function buildRule(
       resourceTypes: ["main_frame", "sub_frame"],
     },
   };
-  if (excludedTabIds.length > 0) {
-    rule.condition.excludedTabIds = excludedTabIds;
-  }
-  return rule;
 }
 
 /**

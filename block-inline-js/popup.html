@@ -21,24 +21,10 @@
 
   <div class="actions">
     <button id="reload" type="button">Reload with policy</button>
-    <button id="copy-csp" type="button">Copy CSP header</button>
+    <button id="pause" type="button">Pause 10 min</button>
     <button id="allow-tab" type="button">Allow this tab</button>
   </div>
-
-  <div class="relax">
-    <span class="relax-label">Pause:</span>
-    <button type="button" data-pause-min="5">5m</button>
-    <button type="button" data-pause-min="15">15m</button>
-    <button type="button" data-pause-min="30">30m</button>
-    <button type="button" data-pause-min="60">60m</button>
-    <button id="pause" type="button">Resume</button>
-  </div>
   <p id="pause-state" class="rule"></p>
-
-  <details id="source-view" hidden>
-    <summary>Script source</summary>
-    <pre id="source-code" class="code"></pre>
-  </details>
 
   <fieldset>
     <legend>Allowed script origins on this site</legend>

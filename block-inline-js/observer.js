@@ -18,11 +18,6 @@
   /** @type {object[]} */
   const queue = [];
   const FRAME = { url: location.href, isTop: window === window.top };
-  // Tracks DOM nodes we've already cataloged. A WeakSet holds only weak
-  // references, so observed nodes are garbage-collected as soon as the page
-  // discards them (no leak in long-lived SPAs) while reparented nodes are
-  // never re-hashed or double-counted.
-  const processedNodes = new WeakSet();
 
   function push(event) {
     if (queue.length >= MAX_QUEUE) queue.shift();
@@ -64,9 +59,6 @@
   }
 
   async function recordScript(el) {
-    if (processedNodes.has(el)) return;
-    processedNodes.add(el);
-
     const src = el.getAttribute("src");
     if (src !== null && src !== "") {
       let abs;
@@ -99,23 +91,18 @@
         action: "observed",
         reason: null,
         hash,
-        raw: raw.slice(0, 8000),
         snippet: raw.replace(/\s+/g, " ").trim().slice(0, 200),
       });
     }
   }
 
   function recordHandlers(el) {
-    if (processedNodes.has(el)) return;
-    let found = false;
     for (const attr of el.attributes) {
       if (/^on/i.test(attr.name)) {
-        found = true;
         // Hash is computed async; queue a placeholder then enrich it.
         enrichHandler(attr, el).catch(() => {});
       }
     }
-    if (found) processedNodes.add(el);
   }
 
   async function enrichHandler(attr, el) {
@@ -132,7 +119,6 @@
       handler: attr.name.toLowerCase(),
       target: el.tagName.toLowerCase(),
       hash: hash ? `attr-${hash}` : null,
-      raw: value.slice(0, 4000),
       snippet: `${attr.name.toLowerCase()}="${value.slice(0, 60)}"`,
     });
   }
@@ -141,21 +127,12 @@
   function processNode(node) {
     if (node.nodeType !== Node.ELEMENT_NODE) return;
     if (node.tagName === "SCRIPT") recordScript(node);
-    // Fast path: native getElementsByTagName collection (much faster than a
-    // selector sweep in Gecko) without materializing a NodeList.
-    for (const script of node.getElementsByTagName?.("script") ?? []) {
+    if (node.attributes?.length) recordHandlers(node);
+    for (const script of node.querySelectorAll?.("script") ?? []) {
       recordScript(script);
     }
-    // Handler sweep: visit only element nodes via a TreeWalker. Avoids the
-    // quadratic attribute check over every descendant of a large subtree.
-    if (node.childElementCount > 0 || node.attributes?.length) {
-      recordHandlers(node);
-      const walker = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
-      let curr = walker.nextNode();
-      while (curr) {
-        recordHandlers(curr);
-        curr = walker.nextNode();
-      }
+    for (const el of node.querySelectorAll?.("*") ?? []) {
+      if (el.attributes?.length) recordHandlers(el);
     }
   }
 
@@ -166,20 +143,6 @@
       for (const n of m.addedNodes) processNode(n);
     }
   }).observe(root, { childList: true, subtree: true });
-
-  // One-time catch-up sweep when the document settles. A MutationObserver
-  // attached at document_start can miss parser chunks flushed before it armed;
-  // this final pass re-walks the whole tree. The WeakSet guarantees nothing is
-  // re-hashed or double-counted.
-  if (document.readyState === "loading") {
-    window.addEventListener(
-      "DOMContentLoaded",
-      () => processNode(document.documentElement),
-      { once: true },
-    );
-  } else {
-    processNode(document.documentElement);
-  }
 
   // Ground truth for anything the active policy blocks (inline scripts,
   // inline handlers, eval()/new Function(), third-party scripts).
