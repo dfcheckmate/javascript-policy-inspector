@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JavaScript Policy Inspector",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Per-site JavaScript control: monitor, allow first-party, or block entirely. See what loads, allow only what you trust.",
   "icons": {
     "16": "icons/icon-16.png",
