@@ -118,6 +118,22 @@ function dedupe(list) {
   return [...new Set(list)];
 }
 
+/**
+ * Builds a deployable CSP header from the current functional state of a host.
+ * Reuses composePolicy so the header always matches what the extension would
+ * enforce. Returns null when the host is in Observe (no policy to deploy).
+ *
+ * @param {string} mode one of MODES
+ * @param {{origins?: string[], scriptHashes?: string[], attrHashes?: string[]}} [allows]
+ * @returns {string | null} e.g. "Content-Security-Policy: script-src 'self' …"
+ */
+export function composeHeader(mode, allows = {}) {
+  const value = composePolicy(mode, allows);
+  if (value === null) return null;
+  return `Content-Security-Policy: ${value}`;
+}
+
+
 /** Validates that a string is a usable http(s) origin for exceptions.
  * @param {unknown} input
  * @returns {string | null}
