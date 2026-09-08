@@ -1,28 +1,57 @@
 /**
- * observer.js — page observation (isolated world), injected at
- * document_start into every http(s) frame.
+ * observer.js — page observation (isolated world), injected at document_start
+ * into every http(s) frame.
  *
- * Reports, never enforces:
- * - <script> elements entering the DOM (first-party vs third-party vs inline)
- * - inline event handler attributes (on*)
+ * Reports, never enforces CSP (the declarativeNetRequest layer is the sole
+ * execution-policy authority):
+ * - <script> elements entering the DOM, classified via lib/classify.js:
+ *   external / inline JavaScript vs non-executing data blocks (JSON-LD,
+ *   JSON data, import maps, speculation rules, unknown containers)
+ * - inline event handler attributes (on*) and javascript: href/src URLs
  * - securitypolicyviolation events (ground truth for CSP blocks, incl. eval)
  *
- * Events are batched and forwarded to the service worker, which keeps the
- * bounded per-tab activity log. No chrome.storage access here.
+ * The DOM layer additionally REMOVES non-executing containers when the
+ * host's stored flag bundle asks for it (blockJsonLd / blockJsonData /
+ * blockImportMaps / blockSpeculationRules) and the payload isn't user-
+ * allowed. Parser-inserted executable scripts run before any observer can
+ * act, so enforcement for those stays with CSP; container removal is safe
+ * only because data blocks never execute. Removed containers are recorded
+ * with hash + metadata + a short snippet only.
+ *
+ * README on flags: the effective bundle is resolved from chrome.storage
+ * (sitePolicies + one-way legacy siteModes migration), mirroring the service
+ * worker's resolver so a paused/overridden tab only differs at the DNR layer.
+ * Until the bundle resolves, removals are deferred to the catch-up sweep —
+ * the default profile (DEFAULT_POLICY = observe) removes nothing.
  */
+
+import { getScriptCategory, isExecutable, isInlineHandlerName, isJavaScriptUrl, CATEGORIES } from "./lib/classify.js";
+import { normalizeHostForRule } from "./lib/host.js";
+import { DEFAULT_POLICY, isFlags, migrateLegacyModes, REMOVAL_FLAG_BY_CATEGORY } from "./lib/flags.js";
 
 (() => {
   const FLUSH_INTERVAL_MS = 250;
   const MAX_QUEUE = 500;
+  const MAX_CODE_RAW = 8000;
+  const MAX_SNIPPET = 200;
 
   /** @type {object[]} */
   const queue = [];
   const FRAME = { url: location.href, isTop: window === window.top };
-  // Tracks DOM nodes we've already cataloged. A WeakSet holds only weak
-  // references, so observed nodes are garbage-collected as soon as the page
-  // discards them (no leak in long-lived SPAs) while reparented nodes are
-  // never re-hashed or double-counted.
+  // WeakSet holds weak references, so cataloged nodes are GC-able the moment
+  // the page discards them (no leak in long-lived SPAs) while reparented
+  // nodes are never re-hashed or double-counted.
   const processedNodes = new WeakSet();
+  // Non-executing containers whose removal decision waits on the policy
+  // bundle. Elements map onto their category via a WeakMap (no property
+  // pollution on live DOM nodes).
+  const pendingContainers = new Set();
+  const containerCategory = new WeakMap();
+
+  /** Effective flags once resolved; null until the storage read completes. */
+  let activeFlags = null;
+  /** Hex digests of containers explicitly exempted from removal on this site. */
+  let allowedDigests = new Set();
 
   function push(event) {
     if (queue.length >= MAX_QUEUE) queue.shift();
@@ -30,23 +59,30 @@
   }
 
   /**
-   * SHA-256 of a payload, formatted as a CSP hash token. Returns null on
-   * insecure contexts (crypto.subtle unavailable) or oversized payloads.
+   * SHA-256 of a payload as BOTH a CSP hash token (base64) and a lowercase
+   * hex digest, computed from the same bytes — the hex form keys the
+   * container allowlist, the token form matches CSP hash allowances.
+   * Returns null on insecure contexts (crypto.subtle unavailable) or
+   * oversized payloads.
    * @param {string} text
-   * @returns {Promise<string | null>} e.g. "sha256-AbCd…="
+   * @returns {Promise<{hash: string, digest: string} | null>}
    */
-  async function hashPayload(text) {
+  async function fingerprint(text) {
     try {
       if (!text || text.length > 100_000 || !crypto?.subtle) return null;
-      const digest = await crypto.subtle.digest(
-        "SHA-256",
-        new TextEncoder().encode(text),
+      const bytes = new Uint8Array(
+        await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(text),
+        ),
       );
       let binary = "";
-      for (const byte of new Uint8Array(digest)) {
+      let hex = "";
+      for (const byte of bytes) {
         binary += String.fromCharCode(byte);
+        hex += byte.toString(16).padStart(2, "0");
       }
-      return `sha256-${btoa(binary)}`;
+      return { hash: `sha256-${btoa(binary)}`, digest: hex };
     } catch {
       return null;
     }
@@ -63,67 +99,171 @@
     }
   }
 
+  function originOf(src) {
+    try {
+      return new URL(src, location.href).origin;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Collapsed ≤200-char payload for a container: src if external, else text. */
+  function snippetOf(el) {
+    const src = el.getAttribute("src");
+    if (src !== null && src !== "") return src.slice(0, MAX_SNIPPET);
+    return (el.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, MAX_SNIPPET);
+  }
+
+  function pushObservedContainer(el, category, fp, reason) {
+    const src = el.getAttribute("src");
+    push({
+      kind: "script-element",
+      category,
+      executable: false,
+      action: "observed",
+      reason:
+        reason ??
+        (REMOVAL_FLAG_BY_CATEGORY[category]
+          ? `kept (${REMOVAL_FLAG_BY_CATEGORY[category]} not set)`
+          : "not a removable category"),
+      url: src !== null && src !== "" ? src : null,
+      origin: src !== null && src !== "" ? originOf(src) : location.origin,
+      party: src !== null && src !== "" ? partyOf(src) : "inline",
+      hash: fp?.hash ?? null,
+      digest: fp?.digest ?? null,
+      snippet: snippetOf(el),
+    });
+  }
+
+  /**
+   * Decides a container's fate: remove per the gated flag unless the digest
+   * is user-allowed; otherwise record it as observed. Deferred until flags
+   * resolve (the catch-up sweep then settles anything flushed before then).
+   */
+  async function decideContainer(el, category) {
+    if (activeFlags === null) {
+      pendingContainers.add(el);
+      containerCategory.set(el, category);
+      return;
+    }
+    const flag = REMOVAL_FLAG_BY_CATEGORY[category];
+    if (!flag) {
+      pushObservedContainer(el, category, null);
+      return;
+    }
+    if (!activeFlags[flag]) {
+      pushObservedContainer(el, category, null);
+      return;
+    }
+    const src = el.getAttribute("src");
+    const payload = src !== null && src !== "" ? src : (el.textContent ?? "");
+    const fp = await fingerprint(payload);
+    if (fp && allowedDigests.has(fp.digest)) {
+      pushObservedContainer(el, category, fp, "kept (user-allowed container)");
+      return;
+    }
+    push({
+      kind: "script-element",
+      category,
+      executable: false,
+      action: "removed",
+      reason: `container removed (${flag}), non-executing data block`,
+      url: src !== null && src !== "" ? src : null,
+      origin: src !== null && src !== "" ? originOf(src) : location.origin,
+      party: src !== null && src !== "" ? partyOf(src) : "inline",
+      hash: fp?.hash ?? null,
+      digest: fp?.digest ?? null,
+      snippet: snippetOf(el),
+    });
+    el.remove();
+  }
+
+  /** Release removal decisions that were waiting on the policy bundle. */
+  function flushPendingContainers() {
+    if (activeFlags === null) return;
+    for (const el of pendingContainers) {
+      const category = containerCategory.get(el);
+      if (category) decideContainer(el, category).catch(() => {});
+    }
+    pendingContainers.clear();
+  }
+
   async function recordScript(el) {
     if (processedNodes.has(el)) return;
     processedNodes.add(el);
 
     const src = el.getAttribute("src");
-    if (src !== null && src !== "") {
-      let abs;
-      try {
-        abs = new URL(src, location.href);
-      } catch {
-        push({ kind: "script", url: src, origin: null, party: "unknown", action: "observed", reason: null });
-        return;
+    const category = getScriptCategory({
+      src,
+      type: el.getAttribute("type"),
+    });
+
+    if (isExecutable(category)) {
+      if (src !== null && src !== "") {
+        let abs;
+        try {
+          abs = new URL(src, location.href);
+        } catch {
+          push({
+            kind: "script",
+            category,
+            executable: true,
+            url: src,
+            origin: null,
+            party: "unknown",
+            action: "observed",
+            reason: null,
+          });
+          return;
+        }
+        push({
+          kind: "script",
+          category,
+          executable: true,
+          url: abs.href,
+          origin: abs.origin,
+          party: partyOf(abs.href),
+          action: "observed",
+          reason: null,
+        });
+      } else {
+        // Hash the RAW textContent — browsers compute the CSP hash over the
+        // exact text (including leading/trailing whitespace and indentation),
+        // so trimming here would yield a token that never matches. Only the
+        // displayed snippet is collapsed for readability.
+        const raw = el.textContent ?? "";
+        const fp = await fingerprint(raw);
+        push({
+          kind: "inline-script",
+          category,
+          executable: true,
+          url: null,
+          origin: location.origin,
+          party: "inline",
+          action: "observed",
+          reason: null,
+          hash: fp?.hash ?? null,
+          digest: fp?.digest ?? null,
+          raw: raw.slice(0, MAX_CODE_RAW),
+          snippet: raw.replace(/\s+/g, " ").trim().slice(0, MAX_SNIPPET),
+        });
       }
-      push({
-        kind: "script",
-        url: abs.href,
-        origin: abs.origin,
-        party: partyOf(abs.href),
-        action: "observed",
-        reason: null,
-      });
-    } else {
-      // Hash the RAW textContent — browsers compute the CSP hash over the
-      // exact text (including leading/trailing whitespace and indentation),
-      // so trimming here would yield a token that never matches. Only the
-      // displayed snippet is collapsed for readability.
-      const raw = el.textContent ?? "";
-      const hash = await hashPayload(raw);
-      push({
-        kind: "inline-script",
-        url: null,
-        origin: location.origin,
-        party: "inline",
-        action: "observed",
-        reason: null,
-        hash,
-        raw: raw.slice(0, 8000),
-        snippet: raw.replace(/\s+/g, " ").trim().slice(0, 200),
-      });
+      return;
     }
+
+    decideContainer(el, category).catch(() => {});
   }
 
-  function recordHandlers(el) {
-    if (processedNodes.has(el)) return;
-    let found = false;
-    for (const attr of el.attributes) {
-      if (/^on/i.test(attr.name)) {
-        found = true;
-        // Hash is computed async; queue a placeholder then enrich it.
-        enrichHandler(attr, el).catch(() => {});
-      }
-    }
-    if (found) processedNodes.add(el);
-  }
+  const ATTRIBUTE_SWEEP_KEYS = new Set(["href", "src"]);
 
   async function enrichHandler(attr, el) {
     const value = attr.value ?? "";
     // Hash the RAW attribute value for the same reason as inline scripts.
-    const hash = await hashPayload(value);
+    const fp = await fingerprint(value);
     push({
       kind: "inline-handler",
+      category: CATEGORIES.INLINE_JAVASCRIPT,
+      executable: true,
       url: null,
       origin: location.origin,
       party: "inline",
@@ -131,10 +271,45 @@
       reason: null,
       handler: attr.name.toLowerCase(),
       target: el.tagName.toLowerCase(),
-      hash: hash ? `attr-${hash}` : null,
-      raw: value.slice(0, 4000),
+      hash: fp ? `attr-${fp.hash}` : null,
+      digest: fp?.digest ?? null,
+      raw: value.slice(0, MAX_CODE_RAW),
       snippet: `${attr.name.toLowerCase()}="${value.slice(0, 60)}"`,
     });
+  }
+
+  /** on* handler + javascript: href/src sweep over a single element's attrs. */
+  function recordAttributes(el) {
+    if (processedNodes.has(el)) return;
+    let found = false;
+    for (const attr of el.attributes) {
+      const name = attr.name;
+      if (isInlineHandlerName(name)) {
+        found = true;
+        // Hash is computed async; queue a placeholder then enrich it.
+        enrichHandler(attr, el).catch(() => {});
+      } else if (
+        (name === "href" || name === "src") &&
+        isJavaScriptUrl(attr.value)
+      ) {
+        found = true;
+        const value = attr.value;
+        push({
+          kind: "javascript-url",
+          category: CATEGORIES.JAVASCRIPT_URL,
+          executable: true,
+          url: value,
+          origin: location.origin,
+          party: "inline",
+          action: "observed",
+          reason: null,
+          attr: name,
+          target: el.tagName.toLowerCase(),
+          snippet: value.replace(/\s+/g, " ").trim().slice(0, MAX_SNIPPET),
+        });
+      }
+    }
+    if (found) processedNodes.add(el);
   }
 
   /** Walk an inserted subtree; parser chunks can carry many nodes at once. */
@@ -146,21 +321,52 @@
     for (const script of node.getElementsByTagName?.("script") ?? []) {
       recordScript(script);
     }
-    // Handler sweep: visit only element nodes via a TreeWalker. Avoids the
+    // Attribute sweep: visit only element nodes via a TreeWalker. Avoids the
     // quadratic attribute check over every descendant of a large subtree.
     if (node.childElementCount > 0 || node.attributes?.length) {
-      recordHandlers(node);
+      recordAttributes(node);
       const walker = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
       let curr = walker.nextNode();
       while (curr) {
-        recordHandlers(curr);
+        recordAttributes(curr);
         curr = walker.nextNode();
       }
     }
   }
 
-  const root =
-    document.documentElement ?? document;
+  // Resolve the effective flag bundle + container allowlist for this frame.
+  // Mirrors the SW resolver (storage is the canonical store); the one-way
+  // legacy-siteModes migration is idempotent in both writers.
+  async function loadPolicy() {
+    try {
+      const store = await chrome.storage.local.get([
+        "sitePolicies",
+        "siteModes",
+        "siteContainerAllows",
+      ]);
+      const { policies, changed } = migrateLegacyModes(
+        store.sitePolicies ?? {},
+        store.siteModes ?? {},
+      );
+      if (changed) {
+        chrome.storage.local.set({ sitePolicies: policies }).catch(() => {});
+      }
+      try {
+        const key = normalizeHostForRule(location.hostname);
+        activeFlags = isFlags(policies[key]) ? policies[key] : DEFAULT_POLICY;
+        const allows = store.siteContainerAllows?.[key];
+        allowedDigests = new Set(Array.isArray(allows) ? allows : []);
+      } catch {
+        activeFlags = DEFAULT_POLICY;
+      }
+    } catch {
+      activeFlags = DEFAULT_POLICY;
+    }
+    flushPendingContainers();
+  }
+  loadPolicy();
+
+  const root = document.documentElement ?? document;
   new MutationObserver((muts) => {
     for (const m of muts) {
       for (const n of m.addedNodes) processNode(n);

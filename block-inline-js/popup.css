@@ -307,3 +307,44 @@ pre.code {
 .detail li button[data-view-source] {
   color: #60a5fa;
 }
+
+/* --- Phase 4: advanced profile UI --- */
+
+.hint.warn {
+  color: #fbbf24;
+}
+
+.count.hot b {
+  color: #fbbf24;
+}
+
+.activity li.removed {
+  color: #a7f3d0;
+}
+
+#advanced {
+  margin-bottom: 6px;
+}
+
+#advanced summary {
+  font-size: 11px;
+  color: #a3a3a3;
+  cursor: pointer;
+}
+
+#flag-controls {
+  padding-top: 4px;
+}
+
+#flag-controls label.flag {
+  font-size: 12px;
+  padding: 2px 0;
+}
+
+#flag-controls input[type="checkbox"] {
+  accent-color: #d97706;
+}
+
+#flag-error {
+  margin: 4px 0 8px;
+}

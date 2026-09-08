@@ -8,16 +8,18 @@ import {
   POLICY_SUMMARY,
   composeHeader,
   composePolicy,
+  composePolicyFromFlags,
   isMode,
   normalizeOrigin,
 } from "../lib/policies.js";
+import { PRESETS, makeFlags } from "../lib/flags.js";
 import {
   RULE_BANDS,
   buildRule,
   isPolicyRuleFor,
-  normalizeHostForRule,
   ruleIdFor,
 } from "../lib/rules.js";
+import { normalizeHostForRule } from "../lib/host.js";
 
 const FIRST_PARTY_CSP =
   "script-src 'self'; script-src-attr 'none'; object-src 'none'; base-uri 'none'";
@@ -67,7 +69,7 @@ test("ruleIdFor has no collisions across sample hosts", () => {
 });
 
 test("buildRule produces the first-party rule shape", () => {
-  const rule = buildRule("example.com", MODES.FIRST_PARTY_ONLY);
+  const rule = buildRule("example.com", PRESETS[MODES.FIRST_PARTY_ONLY]);
   assert.equal(rule.id, ruleIdFor("example.com"));
   assert.equal(rule.priority, 1);
   assert.equal(rule.action.type, "modifyHeaders");
@@ -80,16 +82,24 @@ test("buildRule produces the first-party rule shape", () => {
   assert.deepEqual(rule.condition.resourceTypes, ["main_frame", "sub_frame"]);
 });
 
-test("observe mode has no enforceable CSP", () => {
-  assert.throws(() => buildRule("example.com", MODES.OBSERVE), /no enforceable/);
+test("observe and container-only bundles have no enforceable CSP rule", () => {
+  assert.throws(
+    () => buildRule("example.com", PRESETS[MODES.OBSERVE]),
+    /no enforceable/,
+  );
+  assert.throws(
+    () => buildRule("example.com", makeFlags({ blockJsonLd: true })),
+    /no enforceable/,
+  );
 });
 
-test("unknown modes are rejected", () => {
-  assert.throws(() => buildRule("example.com", "lockdown"), /unknown mode/);
+test("unknown flags are rejected", () => {
+  assert.throws(() => buildRule("example.com", "lockdown"), /unknown policy flags/);
+  assert.throws(() => buildRule("example.com", null), /unknown policy flags/);
 });
 
 test("isPolicyRuleFor matches its own host only", () => {
-  const ours = buildRule("example.com", MODES.NO_SCRIPTS);
+  const ours = buildRule("example.com", PRESETS[MODES.NO_SCRIPTS]);
   assert.ok(isPolicyRuleFor(ours, "example.com"));
   assert.equal(isPolicyRuleFor(ours, "other.com"), false);
   assert.equal(isPolicyRuleFor({ id: 123 }, "example.com"), false);
@@ -205,4 +215,112 @@ test("composeHeader wraps composePolicy in a Content-Security-Policy header", ()
 
 test("composeHeader returns null for observe mode", () => {
   assert.equal(composeHeader(MODES.OBSERVE), null);
+});
+
+test("composePolicyFromFlags: presets match the documented CSP exactly", () => {
+  assert.equal(composePolicyFromFlags(PRESETS[MODES.OBSERVE]), null);
+  assert.equal(composePolicyFromFlags(PRESETS[MODES.FIRST_PARTY_ONLY]), FIRST_PARTY_CSP);
+  assert.equal(composePolicyFromFlags(PRESETS[MODES.NO_SCRIPTS]), NO_SCRIPTS_CSP);
+});
+
+test("composePolicyFromFlags: CSP_POLICIES cannot drift from presets", () => {
+  for (const mode of Object.values(MODES)) {
+    assert.equal(CSP_POLICIES[mode], composePolicyFromFlags(PRESETS[mode]));
+  }
+});
+
+test("composePolicyFromFlags: container/report-only bundles need no CSP", () => {
+  assert.equal(composePolicyFromFlags(makeFlags({ blockJsonLd: true })), null);
+  assert.equal(
+    composePolicyFromFlags(makeFlags({ blockJsonData: true, blockImportMaps: true })),
+    null,
+  );
+  assert.equal(composePolicyFromFlags(makeFlags({ reportBlockedContent: false })), null);
+});
+
+test("composePolicyFromFlags: blockExternalScripts roots at 'none' (origins replace it)", () => {
+  const allExternal = makeFlags({
+    blockExternalScripts: true,
+    blockClassicScripts: true,
+    blockModuleScripts: true,
+  });
+  assert.equal(
+    composePolicyFromFlags(allExternal),
+    "script-src 'none'; script-src-attr 'none'; object-src 'none'; base-uri 'none'",
+  );
+  assert.equal(
+    composePolicyFromFlags(allExternal, { origins: ["https://cdn.vendor.example"] }),
+    "script-src https://cdn.vendor.example; script-src-attr 'none'; object-src 'none'; base-uri 'none'",
+  );
+});
+
+test("composePolicyFromFlags: '*' posture blocks inline while allowing all external scripts", () => {
+  assert.equal(
+    composePolicyFromFlags(makeFlags({ blockClassicScripts: true, blockModuleScripts: true })),
+    "script-src *; script-src-attr 'none'; object-src 'none'; base-uri 'none'",
+  );
+});
+
+test("composePolicyFromFlags: attr hashes replace script-src-attr 'none' under any posture", () => {
+  const h = "sha256-Q2V0M69lDdMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+  assert.equal(
+    composePolicyFromFlags(
+      makeFlags({
+        blockClassicScripts: true,
+        blockModuleScripts: true,
+        blockThirdPartyScripts: true,
+      }),
+      { attrHashes: [`attr-${h}`] },
+    ),
+    `script-src 'self'; script-src-attr ${h}; object-src 'none'; base-uri 'none'`,
+  );
+});
+
+test("composePolicyFromFlags: inline-requiring combos are unexpressible and rejected", () => {
+  // attr-only and partial-inline bundles would force 'unsafe-inline'
+  assert.throws(
+    () => composePolicyFromFlags(makeFlags({ blockInlineEventHandlers: true })),
+    /unsafe-inline/,
+  );
+  assert.throws(
+    () => composePolicyFromFlags(makeFlags({ blockJavascriptUrls: true })),
+    /unsafe-inline/,
+  );
+  assert.throws(
+    () => composePolicyFromFlags(makeFlags({ blockClassicScripts: true })),
+    /unsafe-inline/,
+  );
+  assert.throws(
+    () =>
+      composePolicyFromFlags(
+        makeFlags({ blockThirdPartyScripts: true, blockClassicScripts: false }),
+      ),
+    /unsafe-inline/,
+  );
+  assert.throws(
+    () =>
+      composePolicyFromFlags(
+        makeFlags({ blockExternalScripts: true, blockModuleScripts: false }),
+      ),
+    /unsafe-inline/,
+  );
+  assert.throws(
+    () => composePolicyFromFlags(makeFlags({ blockExternalScripts: true })),
+    /unsafe-inline/,
+  );
+});
+
+test("composePolicy ≡ composePolicyFromFlags(preset) for equal allowances", () => {
+  const allows = {
+    origins: ["https://cdn.a.com"],
+    scriptHashes: ["sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="],
+    attrHashes: ["sha256-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="],
+  };
+  for (const mode of Object.values(MODES)) {
+    assert.equal(
+      composePolicy(mode, allows),
+      composePolicyFromFlags(PRESETS[mode], allows),
+      mode,
+    );
+  }
 });

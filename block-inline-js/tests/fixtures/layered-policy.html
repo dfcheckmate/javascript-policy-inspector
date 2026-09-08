@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Layered Policy Inspector — verification page</title>
+  <!--
+    Manual verification fixture for the layered-policy engine (Phase 5).
+    Load this page with various profiles and check the popup:
+
+    observe        — everything listed below is recorded (observed); nothing removed.
+    firstPartyOnly — CSP blocks inline JS / handlers / javascript: URLs + the
+                     cross-origin (external) script; DOM removes JSON-LD, the
+                     import map and the speculation rules (jsonLd/importMaps/
+                     specRules counters). JSON data block is KEPT (blockJsonData
+                     is off by default; enable it in Advanced to remove).
+    noScripts      — as above plus every external script (local.js too) and all
+                     containers removed.
+
+    Expected popup tallies (observe): inline 2, handlers 1, javascript: URL 1,
+    1st-party 1, 3rd-party 1, network script rows for local.js + tk.example.com.
+    Categories labelled in comment markers below map 1:1 to the classify output.
+  -->
+  <!-- category:inline-classic -->
+  <script>
+    window.observedByItself = true;
+  </script>
+  <!-- category:inline-module -->
+  <script type="module">
+    await import("data:text/javascript,export default 1");
+  </script>
+  <!-- category:external-first-party -->
+  <script src="./local.js" defer></script>
+  <!-- category:external-third-party -->
+  <script src="https://tk.example.com/beacon.js" defer async></script>
+  <!-- category:json-ld -->
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "Organization",
+      "name": "Example"
+    }
+  </script>
+  <!-- category:json-data -->
+  <script type="application/json" id="app-config">
+    { "feature": true, "retries": 3 }
+  </script>
+  <!-- category:import-map -->
+  <script type="importmap">
+    { "imports": { "moment": "./vendor/moment.js" } }
+  </script>
+  <!-- category:speculation-rules -->
+  <script type="speculationrules">
+    { "prefetch": [{ "source": "list", "urls": ["/page/2"] }] }
+  </script>
+  <!-- category:unknown-container -->
+  <script type="text/x-custom-data" id="custom-blob">
+    blah-blah
+  </script>
+</head>
+<body>
+  <h1>layered-policy verification</h1>
+  <!-- category:inline-handler -->
+  <button type="button" onclick="window._clicked = true">handler button</button>
+  <!-- category:javascript-url -->
+  <a href="javascript:void(0)" id="js-link">javascript: link</a>
+  <p id="status">open the extension popup for this page → Inventory / Activity</p>
+</body>
+</html>

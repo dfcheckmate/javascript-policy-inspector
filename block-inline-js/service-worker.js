@@ -1,20 +1,29 @@
 import {
-  DEFAULT_MODE,
-  MODES,
-  composePolicy,
-  isMode,
+  composePolicyFromFlags,
   normalizeOrigin,
 } from "./lib/policies.js";
 import {
+  DEFAULT_POLICY,
+  MODES,
+  isFlags,
+  makeFlags,
+  migrateLegacyModes,
+  modeForFlags,
+  presetFor,
+} from "./lib/flags.js";
+import { computeStats } from "./lib/stats.js";
+import {
   RULE_BANDS,
   buildRule,
-  normalizeHostForRule,
   ruleIdFor,
 } from "./lib/rules.js";
+import { normalizeHostForRule } from "./lib/host.js";
 
-const SITE_MODES_KEY = "siteModes";
+const SITE_POLICIES_KEY = "sitePolicies";
+const SITE_MODES_KEY = "siteModes"; // v1 store: read-only, migrated once
 const EXCEPTIONS_KEY = "siteExceptions";
 const INLINE_ALLOWS_KEY = "siteInlineAllows";
+const CONTAINER_ALLOWS_KEY = "siteContainerAllows"; // { [host]: [hexDigest] }
 const PAUSED_KEY = "pausedUntil";
 const OVERRIDES_KEY = "tabOverrides";
 const BADGE_COLOR = "#b45309";
@@ -52,9 +61,41 @@ async function getStore(key) {
   return data[key] ?? {};
 }
 
-const getSiteModes = () => getStore(SITE_MODES_KEY);
+/**
+ * v2 policy store with one-way v1 migration. On first contact with a legacy
+ * `siteModes` entry (host without a v2 bundle yet), the mode's preset is
+ * materialized and persisted. Returns { [canonHost]: flagsBundle }.
+ */
+async function getSitePolicies() {
+  const data = await chrome.storage.local.get([SITE_POLICIES_KEY, SITE_MODES_KEY]);
+  const { policies, changed } = migrateLegacyModes(
+    data[SITE_POLICIES_KEY],
+    data[SITE_MODES_KEY],
+  );
+  if (changed) {
+    await chrome.storage.local.set({ [SITE_POLICIES_KEY]: policies });
+  }
+  return policies;
+}
+
+/** Effective bundle for a host; hosts without a stored policy get observe. */
+function flagsForHost(policies, hostKey) {
+  return isFlags(policies[hostKey]) ? policies[hostKey] : DEFAULT_POLICY;
+}
+
+/** True when the bundle deploys a CSP rule (observational bundles don't). */
+function hasCsp(flags) {
+  try {
+    return composePolicyFromFlags(flags) !== null;
+  } catch {
+    // stored bundle is unexpressible — never enforce, never crash
+    return false;
+  }
+}
+
 const getExceptions = () => getStore(EXCEPTIONS_KEY);
 const getInlineAllows = () => getStore(INLINE_ALLOWS_KEY);
+const getContainerAllows = () => getStore(CONTAINER_ALLOWS_KEY);
 const getPaused = () => getStore(PAUSED_KEY);
 
 /** Host storage keys are always stored in canonical (eTLD+1) form. */
@@ -65,21 +106,28 @@ const canon = (host) => normalizeHostForRule(host);
 // ---------------------------------------------------------------------------
 
 /**
- * Computes the list of enforced hosts (stored mode != OBSERVE), normalised and
- * de-duplicated, then sorts them so linear-probe ID allocation is identical
- * across every restart and sync — no allocation table needs to be persisted.
- * @returns {{host: string, mode: string}[]} sorted, de-duplicated
+ * Computes the list of enforced hosts (policy bundles with a deployable CSP),
+ * normalised and de-duplicated, then sorts them so linear-probe ID allocation
+ * is identical across every restart and sync — no allocation table needs to
+ * be persisted.
+ * @returns {{host: string, flags: object}[]} sorted, de-duplicated
  */
-function computeEffectiveHosts(modes) {
+function computeEffectiveHosts(policies) {
   const byHost = new Map();
-  for (const raw of Object.keys(modes)) {
+  for (const raw of Object.keys(policies)) {
     const h = normalizeHostForRule(raw);
-    if (h && modes[h] !== MODES.OBSERVE && !byHost.has(h)) {
-      byHost.set(h, modes[h]);
+    if (!h || byHost.has(h)) continue;
+    if (!isFlags(policies[raw])) continue;
+    let enforced = false;
+    try {
+      enforced = composePolicyFromFlags(policies[raw]) !== null;
+    } catch {
+      // unexpressible stored bundle — skip so enforcement never half-applies
     }
+    if (enforced) byHost.set(h, policies[raw]);
   }
   return [...byHost.entries()]
-    .map(([host, mode]) => ({ host, mode }))
+    .map(([host, flags]) => ({ host, flags }))
     .sort((a, b) => (a.host < b.host ? -1 : a.host > b.host ? 1 : 0));
 }
 
@@ -129,10 +177,11 @@ async function isTabOverridden(tabId) {
 
 /**
  * Resolves the enforcement context of `tabId`'s current page, if any.
- * Returns null when the tab has no URL, is not http(s), or its host is in
- * Observe mode (no policy rule to exclude). Otherwise returns the host, its
- * assigned rule id, and its stored allowances so a single rule can be patched.
- * @returns {Promise<{host: string, id: number, mode: string, allows: object} | null>}
+ * Returns null when the tab has no URL, is not http(s), or its host's policy
+ * deploys no CSP (observe/container-only — no policy rule to exclude).
+ * Otherwise returns the host, its assigned rule id, its flags bundle, and its
+ * stored allowances so a single rule can be patched.
+ * @returns {Promise<{host: string, id: number, flags: object, allows: object} | null>}
  */
 async function hostResolverForTab(tabId) {
   let tab;
@@ -148,20 +197,21 @@ async function hostResolverForTab(tabId) {
     return null;
   }
   if (!host) return null;
-  const [modes, exceptions, inlineAllows] = await Promise.all([
-    getSiteModes(),
+  const [policies, exceptions, inlineAllows] = await Promise.all([
+    getSitePolicies(),
     getExceptions(),
     getInlineAllows(),
   ]);
   const hostKey = canon(host);
-  if (!isMode(modes[hostKey]) || modes[hostKey] === MODES.OBSERVE) return null;
-  const effective = computeEffectiveHosts({ ...modes, [hostKey]: modes[hostKey] });
+  const flags = flagsForHost(policies, hostKey);
+  if (!hasCsp(flags)) return null;
+  const effective = computeEffectiveHosts({ ...policies, [hostKey]: flags });
   const id = allocatedRuleIds(effective).get(hostKey);
   if (id === undefined) return null;
   return {
     host: hostKey,
     id,
-    mode: modes[hostKey],
+    flags,
     allows: {
       origins: exceptions[hostKey] ?? [],
       scriptHashes: inlineAllows[hostKey]?.scripts ?? [],
@@ -178,7 +228,7 @@ async function hostResolverForTab(tabId) {
 async function patchHostOverrides(resolver, excludedTabIds) {
   const rule = buildRule(
     resolver.host,
-    resolver.mode,
+    resolver.flags,
     resolver.allows,
     resolver.id,
     excludedTabIds,
@@ -232,38 +282,6 @@ async function toggleTabOverride(tabId) {
 // ---------------------------------------------------------------------------
 // observer event ingestion (bounded per-tab logs in storage.session)
 // ---------------------------------------------------------------------------
-
-/**
- * Derives the popup counters from a tab's event buffer.
- * @param {ObsEvent[]} events
- */
-function computeStats(events) {
-  const stats = {
-    scriptsFirstParty: 0,
-    scriptsThirdParty: 0,
-    inlineScripts: 0,
-    inlineHandlers: 0,
-    blocked: 0,
-  };
-  for (const e of events) {
-    switch (e.kind) {
-      case "script":
-        if (e.party === "third") stats.scriptsThirdParty++;
-        else if (e.party === "first") stats.scriptsFirstParty++;
-        break;
-      case "inline-script":
-        stats.inlineScripts++;
-        break;
-      case "inline-handler":
-        stats.inlineHandlers++;
-        break;
-      case "csp-violation":
-        stats.blocked++;
-        break;
-    }
-  }
-  return stats;
-}
 
 /**
  * Appends events to the tab's bounded ring buffer in storage.session and
@@ -401,17 +419,18 @@ function normalizeRuleList(result) {
 // ---------------------------------------------------------------------------
 
 /**
- * Reconciles dynamic DNR rules with stored modes + exceptions + pauses.
+ * Reconciles dynamic DNR rules with stored policies + exceptions + pauses.
  * Strategy: wipe every rule in the site-policy band, then rebuild from
- * stored state — mode SWITCHES must take effect, so no diffing.
+ * stored state — policy SWITCHES must take effect, so no diffing.
  *
  * Paused hosts are skipped until their pause expires; expired pauses are
- * pruned lazily here so a lost alarm can never wedge a host forever.
+ * pruned lazily here so a lost alarm can never wedge a host forever, and the
+ * pre-pause flag bundle is restored (snapshotted at pause time).
  */
 async function syncRules() {
   try {
-    const [modes, exceptions, inlineAllows, paused] = await Promise.all([
-      getSiteModes(),
+    const [policies, exceptions, inlineAllows, paused] = await Promise.all([
+      getSitePolicies(),
       getExceptions(),
       getInlineAllows(),
       getPaused(),
@@ -419,19 +438,22 @@ async function syncRules() {
     const now = Date.now();
     let changed = false;
     for (const [host, entry] of Object.entries(paused)) {
-      // Migration: pre-0.3.6 entries stored a bare timestamp, not { until }.
+      // Legacy: pre-v0.3.6 entries stored a bare timestamp, and v1 pause
+      // entries have no flags snapshot — default to observe on resume.
       const until = typeof entry === "number" ? entry : entry?.until;
-      if (typeof until === "number" && until <= now && modes[host] === MODES.OBSERVE) {
-        modes[host] = entry?.mode ?? DEFAULT_MODE;
+      if (typeof until === "number" && until <= now) {
+        policies[host] = entry?.flags ?? DEFAULT_POLICY;
         delete paused[host];
         changed = true;
       }
     }
     if (changed) {
-      // prune happened above only when resuming; persist restored modes
-      await chrome.storage.local.set({ [SITE_MODES_KEY]: modes, [PAUSED_KEY]: paused });
+      await chrome.storage.local.set({
+        [SITE_POLICIES_KEY]: policies,
+        [PAUSED_KEY]: paused,
+      });
     }
-    const effectiveHosts = computeEffectiveHosts(modes);
+    const effectiveHosts = computeEffectiveHosts(policies);
     const excludedTabIds = [...(await getOverrideTabs())];
     const ids = allocatedRuleIds(effectiveHosts);
     const rules = normalizeRuleList(
@@ -446,10 +468,10 @@ async function syncRules() {
     // Collision-free: hosts are sorted, then each gets a unique slot via
     // linear probing inside the site-policy band (see allocatedRuleIds). No
     // host is ever dropped, so enforcement never silently fails.
-    const addRules = effectiveHosts.map(({ host }) =>
+    const addRules = effectiveHosts.map(({ host, flags }) =>
       buildRule(
         host,
-        modes[host],
+        flags,
         {
           origins: exceptions[host] ?? [],
           scriptHashes: inlineAllows[host]?.scripts ?? [],
@@ -497,13 +519,13 @@ async function refreshBadge() {
       await setBadge("", BADGE_COLOR);
       return;
     }
-    const [modes, paused, overrides] = await Promise.all([
-      getSiteModes(),
+    const [policies, paused, overrides] = await Promise.all([
+      getSitePolicies(),
       getPaused(),
       getOverrideTabs(),
     ]);
     const key = canon(host);
-    const mode = modes[key] ?? DEFAULT_MODE;
+    const flags = flagsForHost(policies, key);
     const isPaused = paused[key] != null;
     const isOverride = overrides.has(tabId);
 
@@ -516,7 +538,7 @@ async function refreshBadge() {
       await setBadge(blocked > 0 ? String(blocked) : "\u22C5", "#b45309");
       return;
     }
-    if (mode === MODES.OBSERVE) {
+    if (!hasCsp(flags)) {
       await setBadge("", BADGE_COLOR);
       return;
     }
@@ -564,14 +586,24 @@ chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
   if (changeInfo.status === "loading" || changeInfo.url !== undefined) refreshBadge();
 });
 
-/** @param {string} host @param {string} mode */
-async function setSiteMode(host, mode) {
-  if (!isMode(mode)) throw new Error(`invalid mode: ${mode}`);
-  const siteModes = await getSiteModes();
+/**
+ * Stores a flag bundle as the host's policy and reconciles rules. Bundles
+ * without a deployable CSP (observe, container-only) also cancel any pause
+ * so the host is never left "paused" with nothing to resume.
+ * @param {string} host
+ * @param {object} flags full bundle (see lib/flags.js)
+ */
+async function setSitePolicy(host, flags) {
   const key = canon(host);
-  siteModes[key] = mode;
-  await chrome.storage.local.set({ [SITE_MODES_KEY]: siteModes });
-  if (mode === MODES.OBSERVE) await resumeHost(host).catch(() => {});
+  const policies = await getSitePolicies();
+  if (modeForFlags(flags) === MODES.OBSERVE) {
+    // observe is equivalent to "no policy stored" — keep the store canonical
+    delete policies[key];
+  } else {
+    policies[key] = flags;
+  }
+  await chrome.storage.local.set({ [SITE_POLICIES_KEY]: policies });
+  if (!hasCsp(flags)) await resumeHost(host).catch(() => {});
   else await syncRules();
 }
 
@@ -581,10 +613,12 @@ async function setSiteMode(host, mode) {
 
 /** Pauses enforcement for `host` for `ms`; resumes automatically. */
 async function pauseHost(host, ms) {
-  const paused = await getPaused();
+  const [paused, policies] = await Promise.all([getPaused(), getSitePolicies()]);
   const key = canon(host);
   const until = Date.now() + ms;
-  paused[key] = { until };
+  // Snapshot the current bundle so an expired pause restores exactly what the
+  // user had, not a globally-changed default.
+  paused[key] = { until, flags: flagsForHost(policies, key) };
   await chrome.storage.local.set({ [PAUSED_KEY]: paused });
   await chrome.alarms.create(`resume:${key}`, { when: until });
   await syncRules();
@@ -658,6 +692,38 @@ async function addInlineAllow(host, kind, hash) {
   return entry;
 }
 
+const CONTAINER_DIGEST_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * Exempts one non-executing container from DOM removal on a host by adding
+ * its SHA-256 hex digest to the allowlist (watched by the observer's removal
+ * gate). Storage shape: { [canonHost]: string[] }.
+ * @param {string} host
+ * @param {string} digest 64-char lowercase hex
+ */
+async function addContainerAllow(host, digest) {
+  const clean = String(digest).replace(/^attr-/, "");
+  if (!CONTAINER_DIGEST_RE.test(clean) && !ALLOWED_HASH_RE.test(clean)) {
+    throw new Error("invalid container digest (expected 64 hex chars)");
+  }
+  const all = await getContainerAllows();
+  const key = canon(host);
+  const list = all[key] ?? [];
+  if (!list.includes(clean)) list.push(clean);
+  all[key] = list;
+  await chrome.storage.local.set({ [CONTAINER_ALLOWS_KEY]: all });
+  return list;
+}
+
+/** Removes a container digest from a host's allowlist. */
+async function removeContainerAllow(host, digest) {
+  const all = await getContainerAllows();
+  const key = canon(host);
+  all[key] = (all[key] ?? []).filter((d) => d !== digest);
+  await chrome.storage.local.set({ [CONTAINER_ALLOWS_KEY]: all });
+  return all[key];
+}
+
 // ---------------------------------------------------------------------------
 // lifecycle
 // ---------------------------------------------------------------------------
@@ -705,8 +771,9 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
 
 /**
  * Message hub for the popup and observer content scripts.
- * - {type:"get-state", host, tabId?}   -> {mode, pausedUntil, tabOverride, exceptions}
- * - {type:"set-mode", host, mode}      -> {ok:true}
+ * - {type:"get-state", host, tabId?}   -> {flags, mode, activeCsp, pausedUntil, tabOverride, exceptions, inlineAllows}
+ * - {type:"set-mode", host, mode}      -> {ok:true}   (mode = preset name)
+ * - {type:"set-policy", host, flags}   -> {ok:true}   (arbitrary flag bundle)
  * - {type:"obs-events", events}        -> {ok:true}  (tab from sender)
  * - {type:"get-activity", tabId}       -> {events, stats, netEvents}
  * - {type:"pause-host", host}          -> {until}
@@ -714,45 +781,69 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
  * - {type:"toggle-tab-override", tabId}-> {active}
  * - {type:"add-exception", host, origin}    -> {exceptions}
  * - {type:"remove-exception", host, origin}-> {exceptions}
- * - {type:"export-settings"}           -> {siteModes, siteExceptions}
- * - {type:"import-settings", data}     -> {ok:true}
+ * - {type:"export-settings"}           -> {version:2, sitePolicies, siteExceptions, siteInlineAllows, siteContainerAllows}
+ * - {type:"import-settings", data}     -> {ok:true} (accepts v1 siteModes + v2 sitePolicies)
+ * - {type:"add-container-allow", host, digest}    -> {containerAllows}
+ * - {type:"remove-container-allow", host, digest} -> {containerAllows}
  */
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     switch (msg?.type) {
       case "get-state": {
-        const [siteModes, exceptions, inlineAllows, paused] =
+        const [policies, exceptions, inlineAllows, containerAllows, paused] =
           await Promise.all([
-            getSiteModes(),
+            getSitePolicies(),
             getExceptions(),
             getInlineAllows(),
+            getContainerAllows(),
             getPaused(),
           ]);
         const key = canon(msg.host);
+        const flags = flagsForHost(policies, key);
+        const allows = {
+          origins: exceptions[key] ?? [],
+          scriptHashes: inlineAllows[key]?.scripts ?? [],
+          attrHashes: inlineAllows[key]?.attrs ?? [],
+        };
+        let activeCsp = null;
+        try {
+          activeCsp = composePolicyFromFlags(flags, allows);
+        } catch {
+          // unexpressible stored bundle — surfaced in the popup as a profile
+          // error rather than crashing the state fetch
+        }
         const state = {
           host: key,
-          mode: siteModes[key] ?? DEFAULT_MODE,
+          flags: { ...flags },
+          mode: modeForFlags(flags) ?? "custom",
           pausedUntil:
             key in paused
               ? typeof paused[key] === "number"
                 ? paused[key]
                 : paused[key]?.until ?? null
               : null,
-          exceptions: exceptions[key] ?? [],
-          inlineAllows: inlineAllows[key] ?? { scripts: [], attrs: [] },
+          exceptions: allows.origins,
+          inlineAllows: { scripts: allows.scriptHashes, attrs: allows.attrHashes },
+          containerAllows: containerAllows[key] ?? [],
+          activeCsp,
         };
-        state.activeCsp = composePolicy(state.mode, {
-          origins: exceptions[key] ?? [],
-          scriptHashes: inlineAllows[key]?.scripts ?? [],
-          attrHashes: inlineAllows[key]?.attrs ?? [],
-        });
         state.tabOverride =
           typeof msg.tabId === "number" && (await isTabOverridden(msg.tabId));
         sendResponse(state);
         break;
       }
       case "set-mode": {
-        await setSiteMode(msg.host, msg.mode);
+        const flags = presetFor(msg.mode);
+        if (!flags) throw new Error(`unknown preset mode: ${String(msg.mode)}`);
+        await setSitePolicy(msg.host, flags);
+        sendResponse({ ok: true });
+        break;
+      }
+      case "set-policy": {
+        if (!isFlags(msg.flags)) {
+          throw new Error("set-policy needs a full flags bundle");
+        }
+        await setSitePolicy(msg.host, makeFlags(msg.flags));
         sendResponse({ ok: true });
         break;
       }
@@ -815,26 +906,77 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           inlineAllows: await addInlineAllow(msg.host, msg.kind, msg.hash),
         });
         break;
+      case "add-container-allow":
+        sendResponse({
+          containerAllows: await addContainerAllow(msg.host, msg.digest),
+        });
+        break;
+      case "remove-container-allow":
+        sendResponse({
+          containerAllows: await removeContainerAllow(msg.host, msg.digest),
+        });
+        break;
       case "export-settings": {
-        const [siteModes, siteExceptions, siteInlineAllows] =
-          await Promise.all([getSiteModes(), getExceptions(), getInlineAllows()]);
-        sendResponse({ siteModes, siteExceptions, siteInlineAllows });
+        const [sitePolicies, siteExceptions, siteInlineAllows, siteContainerAllows] =
+          await Promise.all([
+            getSitePolicies(),
+            getExceptions(),
+            getInlineAllows(),
+            getContainerAllows(),
+          ]);
+        sendResponse({
+          version: 2,
+          sitePolicies,
+          siteExceptions,
+          siteInlineAllows,
+          siteContainerAllows,
+        });
         break;
       }
       case "import-settings": {
         const data = msg.data ?? {};
-        for (const v of Object.values(data.siteModes ?? {})) {
-          if (!isMode(v)) throw new Error(`invalid mode in import: ${v}`);
+        if (typeof data.version === "number" && data.version !== 2) {
+          throw new Error(`unsupported settings version: ${data.version}`);
+        }
+        const policies = {};
+        // v2 bundles first…
+        for (const [k, v] of Object.entries(data.sitePolicies ?? {})) {
+          policies[canon(k)] = makeFlags(v); // validates keys + booleans
+        }
+        // …then legacy v1 modes for hosts still missing a v2 bundle.
+        for (const [k, v] of Object.entries(data.siteModes ?? {})) {
+          const hostKey = canon(k);
+          if (!isFlags(policies[hostKey])) {
+            const preset = presetFor(v);
+            if (!preset) throw new Error(`invalid mode in import: ${v}`);
+            policies[hostKey] = preset;
+          }
+        }
+        // Reject bundles the engine can never deploy (unexpressible combos)
+        // outright, so a bad import can't wedge a host into broken rules.
+        for (const flags of Object.values(policies)) {
+          composePolicyFromFlags(flags);
         }
         const rekey = (obj) => {
           const out = {};
           for (const [k, v] of Object.entries(obj ?? {})) out[canon(k)] = v;
           return out;
         };
+        // Container allowlists carry 64-char hex digests; validate on import
+        // so a corrupted file can't poison the observer's removal gate.
+        for (const digests of Object.values(data.siteContainerAllows ?? {})) {
+          for (const d of digests ?? []) {
+            if (!CONTAINER_DIGEST_RE.test(String(d))) {
+              throw new Error(`invalid container digest in import: ${String(d)}`);
+            }
+          }
+        }
         await chrome.storage.local.set({
-          [SITE_MODES_KEY]: rekey(data.siteModes),
+          [SITE_POLICIES_KEY]: policies,
+          [SITE_MODES_KEY]: {}, // legacy store fully superseded by the import
           [EXCEPTIONS_KEY]: rekey(data.siteExceptions),
           [INLINE_ALLOWS_KEY]: rekey(data.siteInlineAllows),
+          [CONTAINER_ALLOWS_KEY]: rekey(data.siteContainerAllows),
           [PAUSED_KEY]: {},
         });
         await syncRules();

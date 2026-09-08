@@ -16,13 +16,26 @@
     <label><input type="radio" name="mode" value="noScripts" /> No scripts</label>
   </fieldset>
 
+  <p id="persist-note" class="hint">
+    These choices persist across visits. <b>Allow this tab</b> is temporary for
+    the current tab only.
+  </p>
+  <p id="profile-badge" class="hint"></p>
+  <p id="bot-warning" class="hint warn" hidden></p>
+
+  <details id="advanced">
+    <summary>Advanced: per-category flags</summary>
+    <div id="flag-controls"></div>
+    <p id="removal-hint" class="hint"></p>
+  </details>
+
   <p id="summary" class="summary"></p>
   <p id="rule" class="rule"></p>
 
   <div class="actions">
     <button id="reload" type="button">Reload with policy</button>
     <button id="copy-csp" type="button">Copy CSP header</button>
-    <button id="allow-tab" type="button">Allow this tab</button>
+    <button id="allow-tab" type="button" title="Temporary: relaxes policy for this tab only until it navigates away">Allow this tab</button>
   </div>
 
   <div class="relax">

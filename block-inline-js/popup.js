@@ -1,5 +1,10 @@
-import { DEFAULT_MODE, POLICY_SUMMARY, composeHeader } from "./lib/policies.js";
-import { normalizeHostForRule } from "./lib/rules.js";
+import {
+  DEFAULT_MODE,
+  POLICY_SUMMARY,
+  composePolicyFromFlags,
+} from "./lib/policies.js";
+import { FLAG_KEYS, makeFlags, modeForFlags } from "./lib/flags.js";
+import { normalizeHostForRule } from "./lib/host.js";
 import { beautify } from "./lib/beautify.js";
 import { highlight } from "./lib/highlight.js";
 
@@ -22,12 +27,141 @@ const els = {
   sourceView: document.getElementById("source-view"),
   sourceCode: document.getElementById("source-code"),
   relax: () => document.querySelectorAll("[data-pause-min]"),
+  profileBadge: document.getElementById("profile-badge"),
+  botWarning: document.getElementById("bot-warning"),
+  advanced: document.getElementById("advanced"),
+  flagControls: document.getElementById("flag-controls"),
+  removalHint: document.getElementById("removal-hint"),
+  persistNote: document.getElementById("persist-note"),
 };
 
 /** @type {string | null} */
 let host = null;
 /** @type {number | null} */
 let tabId = null;
+
+// ---------------------------------------------------------------------------
+// advanced profile UI (per-category flags)
+// ---------------------------------------------------------------------------
+
+const FLAG_LABELS = {
+  blockClassicScripts: "Block classic <script>",
+  blockModuleScripts: "Block module scripts",
+  blockExternalScripts: "Block all external scripts",
+  blockThirdPartyScripts: "Block third-party scripts",
+  blockInlineEventHandlers: "Block inline event handlers (on*)",
+  blockJavascriptUrls: "Block javascript: URLs",
+  blockImportMaps: "Remove import maps",
+  blockSpeculationRules: "Remove speculation rules",
+  blockJsonLd: "Remove JSON-LD data",
+  blockJsonData: "Remove JSON data blocks",
+  reportBlockedContent: "Report blocked content to activity",
+};
+
+/** Flags that make the DOM layer remove non-executing containers. */
+const DOM_REMOVAL_KEYS = [
+  "blockImportMaps",
+  "blockSpeculationRules",
+  "blockJsonLd",
+  "blockJsonData",
+];
+
+/**
+ * Curated anti-bot / sensor-management hosts (heuristic, not exhaustive).
+ * Used for the "hardening may read as automation" warning and the net-view
+ * sensor badge — a hint, never policy.
+ */
+const BOT_DETECTOR_SUFFIXES = [
+  "datadome.co",
+  "datadome.com",
+  "perimeterx.com",
+  "px-cdn.net",
+  "px-cloud.net",
+  "incapsula.com",
+  "imperva.com",
+  "shape.security",
+  "akamai.com",
+];
+
+/** @param {string} host @returns {boolean} canonical host or its subdomain matches */
+function isBotDetectorHost(host) {
+  const h = normalizeHostForRule(host);
+  return BOT_DETECTOR_SUFFIXES.some((s) => h === s || h.endsWith(`.${s}`));
+}
+
+function renderFlagControls(flags) {
+  els.flagControls.replaceChildren();
+  for (const key of FLAG_KEYS) {
+    const label = document.createElement("label");
+    label.className = "flag";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = Boolean(flags[key]);
+    cb.dataset.flag = key;
+    label.append(cb, document.createTextNode(` ${FLAG_LABELS[key] ?? key}`));
+    els.flagControls.append(label);
+  }
+}
+
+function checkedFlags() {
+  const out = {};
+  for (const input of els.flagControls.querySelectorAll("input[data-flag]")) {
+    out[input.dataset.flag] = input.checked;
+  }
+  return out;
+}
+
+function setFlagError(message, ref) {
+  if (message) {
+    let p = document.getElementById("flag-error");
+    if (!p) {
+      p = document.createElement("p");
+      p.id = "flag-error";
+      p.className = "hint warn";
+      els.advanced.before(p);
+    }
+    p.textContent = message;
+  } else {
+    document.getElementById("flag-error")?.remove();
+  }
+  ref?.scrollIntoView?.({ block: "nearest" });
+}
+
+function updateProfileBadge(flags) {
+  els.profileBadge.textContent =
+    modeForFlags(flags) === null
+      ? "Custom profile — the flags below differ from the presets above."
+      : "Preset profile — matches one of the modes above.";
+}
+
+function updateRemovalHint(flags) {
+  const active = DOM_REMOVAL_KEYS.filter((key) => flags[key]);
+  els.removalHint.textContent = active.length
+    ? `Container removal active: ${active.map((k) => FLAG_LABELS[k]).join(", ")}. ` +
+      "Removal is visible to page scripts (a MutationObserver sees nodes vanish) — " +
+      "a site that screens for automation can detect it."
+    : "No containers are being removed for this profile.";
+}
+
+function updateBotWarning(flags) {
+  const hardening =
+    flags.blockExternalScripts ||
+    flags.blockThirdPartyScripts ||
+    flags.blockClassicScripts;
+  const bot = host !== null && isBotDetectorHost(host);
+  els.botWarning.hidden = !(hardening && bot);
+  if (hardening && bot) {
+    els.botWarning.textContent =
+      `${host} runs a bot-management / sensor suite. Enforcing here may be ` +
+      "read as automation. Prefer a scoped profile (e.g. remove JSON-LD only) " +
+      "or observe-only for this site.";
+  }
+}
+
+function renderMode(mode) {
+  for (const radio of els.radios()) radio.checked = radio.value === mode;
+  els.summary.textContent = POLICY_SUMMARY[mode] ?? "";
+}
 
 /** Resolves hostname + tab id of the active tab; null when unsupported. */
 async function activeTabContext() {
@@ -41,11 +175,6 @@ async function activeTabContext() {
   if (!/^https?:$/.test(url.protocol) || !url.hostname) return null;
   // Fold to eTLD+1 so subdomains resolve to the same stored policy/rule.
   return { host: normalizeHostForRule(url.hostname), tabId: tab.id };
-}
-
-function render(mode) {
-  for (const radio of els.radios()) radio.checked = radio.value === mode;
-  els.summary.textContent = POLICY_SUMMARY[mode] ?? "";
 }
 
 /** Shows the CSP the extension would enforce for this host, as computed by
@@ -102,11 +231,16 @@ async function refreshUi() {
   if (state?.error) return;
   lastInlineAllows = state.inlineAllows ?? { scripts: [], attrs: [] };
   lastExceptions = state.exceptions ?? [];
-  render(state.mode ?? DEFAULT_MODE);
+  lastContainerAllows = state.containerAllows ?? [];
+  renderMode(state.mode ?? DEFAULT_MODE);
+  renderRuleStatus(state.activeCsp);
+  renderFlagControls(state.flags);
+  updateProfileBadge(state.flags);
+  updateRemovalHint(state.flags);
+  updateBotWarning(state.flags);
   renderPaused(state.pausedUntil);
   renderTabOverride(Boolean(state.tabOverride));
   renderExceptions(state.exceptions);
-  renderRuleStatus(state.activeCsp);
   await loadActivity();
 }
 
@@ -129,6 +263,38 @@ els.radios().forEach((radio) =>
     await refreshUi();
   }),
 );
+
+// Advanced per-category toggles. A bundle the engine can never deploy (any
+// enforced posture that would need 'unsafe-inline' — e.g. blocking external
+// scripts while inline scripts stay allowed) is refused and the checkbox
+// reverted, so the popup can never store a dead profile.
+els.flagControls.addEventListener("change", async (event) => {
+  const cb = event.target.closest("input[data-flag]");
+  if (!cb || !host) return;
+  const candidate = makeFlags(checkedFlags());
+  try {
+    composePolicyFromFlags(candidate);
+  } catch (err) {
+    cb.checked = !cb.checked;
+    setFlagError(
+      `Rejected: cannot express this combination without allowing inline ` +
+        `scripts ('unsafe-inline'). Cause: ${String(err.message ?? err)}`,
+      cb,
+    );
+    return;
+  }
+  setFlagError(null);
+  const res = await chrome.runtime.sendMessage({
+    type: "set-policy",
+    host,
+    flags: candidate,
+  });
+  if (res?.error) {
+    setFlagError(`Error: ${res.error}`, cb);
+    return;
+  }
+  await refreshUi();
+});
 
 els.reload.addEventListener("click", async () => {
   if (tabId !== null) await chrome.tabs.reload(tabId);
@@ -158,6 +324,8 @@ for (const btn of els.relax()) {
 }
 
 // Copy a deployable CSP header for this host (built client-side, offline).
+// Uses the SW-computed activeCsp so presets AND custom profiles (and their
+// allowances) always produce the exact header the extension would enforce.
 els.copyCsp.addEventListener("click", async () => {
   if (!host) return;
   const state = await chrome.runtime.sendMessage({
@@ -169,15 +337,11 @@ els.copyCsp.addEventListener("click", async () => {
     els.pauseState.textContent = state.error;
     return;
   }
-  const header = composeHeader(state.mode ?? DEFAULT_MODE, {
-    origins: state.exceptions ?? [],
-    scriptHashes: state.inlineAllows?.scripts ?? [],
-    attrHashes: state.inlineAllows?.attrs ?? [],
-  });
-  if (header == null) {
+  if (state.activeCsp == null) {
     els.pauseState.textContent = "No CSP to copy (Observe mode)";
     return;
   }
+  const header = `Content-Security-Policy: ${state.activeCsp}`;
   try {
     await navigator.clipboard.writeText(header);
   } catch {
@@ -276,6 +440,8 @@ const KIND_LABELS = {
   "inline-script": "inline <script>",
   "inline-handler": "inline handler",
   "csp-violation": "CSP block",
+  "script-element": "container",
+  "javascript-url": "javascript: URL",
 };
 
 function fmtTime(ts) {
@@ -300,6 +466,7 @@ function renderInventory(stats) {
     ["inline-script", "inline", stats.inlineScripts],
     ["inline-handler", "handlers", stats.inlineHandlers],
     ["csp-violation", "blocked", stats.blocked],
+    ["removed", "removed", stats.removed],
     ["net", "network", stats.netRequests ?? 0],
   ];
   for (const [view, label, n] of items) {
@@ -314,7 +481,7 @@ function renderInventory(stats) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.dataset.view = view;
-      btn.className = `count${label === "blocked" ? " hot" : ""}`;
+      btn.className = `count${label === "blocked" || label === "removed" ? " hot" : ""}`;
       const b = document.createElement("b");
       b.textContent = n;
       btn.append(b, label);
@@ -331,6 +498,7 @@ function detailRows(view, events) {
     "inline-script": (e) => e.kind === "inline-script",
     "inline-handler": (e) => e.kind === "inline-handler",
     "csp-violation": (e) => e.kind === "csp-violation",
+    removed: (e) => e.kind === "script-element" && e.action === "removed",
     net: (e) => e.kind === "net",
   };
   const byKey = new Map();
@@ -355,6 +523,9 @@ function detailRows(view, events) {
       action = { kind: "script", value: row.hash };
     } else if (view === "inline-handler" && row.hash) {
       action = { kind: "attr", value: row.hash };
+    } else if (view === "removed" && row.digest) {
+      // "Allow" = never remove this container again on this site.
+      action = { kind: "container", value: row.digest };
     }
     return { ...row, action };
   });
@@ -481,6 +652,7 @@ function renderDetail(view, events, inlineAllows, exceptions) {
   const allowedSet = new Set([
     ...(inlineAllows?.scripts ?? []),
     ...(inlineAllows?.attrs ?? []),
+    ...lastContainerAllows,
   ]);
   const excSet = new Set(exceptions ?? []);
   el.replaceChildren();
@@ -499,11 +671,12 @@ function renderDetail(view, events, inlineAllows, exceptions) {
     // Network request rows. Our CSP only gates *script* requests, so an
     // Allow action (adding the request's origin to the site exceptions) is
     // meaningful solely for script-type rows; every other type stays
-    // observation-only.
+    // observation-only. Sensor/bot-management origins get a hint badge.
     for (const row of rows) {
       const badge =
         `${row.type ?? ""}${row.status ? ` · ${row.status}` : " · …"}` +
-        (row.count > 1 ? ` · ×${row.count}` : "");
+        (row.count > 1 ? ` · ×${row.count}` : "") +
+        (isBotDetectorOrigin(row.url) ? " · sensor" : "");
       const isBad = /ERR|FAILED/.test(row.status ?? "");
       const title = `${row.method} ${row.url}`;
       let allowKind = null;
@@ -548,6 +721,8 @@ function renderDetail(view, events, inlineAllows, exceptions) {
     }
     // Inline rows (script/handler) expose their raw body for preview; external
     // script rows (first/third) offer a "View" that fetches the source.
+    // Removed containers preview their snippet (metadata only, never the raw
+    // body, matching the observer's trimmed record).
     const isInline = view === "inline-script" || view === "inline-handler";
     appendDetailRow(el, {
       cls: null,
@@ -556,7 +731,12 @@ function renderDetail(view, events, inlineAllows, exceptions) {
       allowed: allowKind === "",
       allowKind: allowKind === "" ? null : allowKind,
       allowValue,
-      source: isInline ? row.raw ?? null : null,
+      source:
+        view === "removed"
+          ? row.snippet ?? null
+          : isInline
+            ? row.raw ?? null
+            : null,
       sourceUrl: row.url && !isInline ? row.url : null,
     });
   }
@@ -576,9 +756,19 @@ let currentView = null;
 let lastEvents = [];
 let lastNetEvents = [];
 let lastInlineAllows = { scripts: [], attrs: [] };
+let lastContainerAllows = [];
 let lastExceptions = [];
 
 const allEvents = () => [...lastEvents, ...lastNetEvents];
+
+/** @param {string} url @returns {boolean} true when the request origin runs a sensor/bot suite */
+function isBotDetectorOrigin(url) {
+  try {
+    return isBotDetectorHost(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
 
 document.getElementById("inventory").addEventListener("click", (event) => {
   const view = event.target?.dataset?.view;
@@ -602,7 +792,9 @@ document.getElementById("detail").addEventListener("click", async (event) => {
     const message =
       kind === "origin"
         ? { type: "add-exception", host, origin: value }
-        : { type: "add-inline-allow", host, kind, hash: value };
+        : kind === "container"
+          ? { type: "add-container-allow", host, digest: value }
+          : { type: "add-inline-allow", host, kind, hash: value };
     const res = await chrome.runtime.sendMessage(message);
     if (res?.error) return;
     await refreshUi();
@@ -633,9 +825,13 @@ function renderActivity(events) {
     const what =
       e.kind === "csp-violation"
         ? e.reason ?? "violation"
-        : `${KIND_LABELS[e.kind] ?? e.kind}${e.url ? `: ${e.url}` : ""}`;
+        : e.kind === "script-element"
+          ? `${KIND_LABELS[e.kind] ?? e.kind} (${e.category ?? "?"})${
+              e.action === "removed" ? " · removed" : ""
+            }: ${e.snippet ?? e.url ?? ""}`
+          : `${KIND_LABELS[e.kind] ?? e.kind}${e.url ? `: ${e.url}` : ""}`;
     const li = document.createElement("li");
-    if (e.action === "blocked") li.className = "blocked";
+    if (e.action === "blocked" || e.action === "removed") li.className = e.action;
     li.title = what;
     const time = document.createElement("time");
     time.textContent = fmtTime(e.ts);

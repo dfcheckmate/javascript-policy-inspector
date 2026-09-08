@@ -18,7 +18,9 @@ const distDevDir = path.resolve("dist-edge");
 const distDir = path.resolve("dist-firefox");
 
 // ---------------------------------------------------------------------------
-// 1. Bundle service-worker.js + its local imports into a single flat file
+// 1. Bundle entry points (service-worker.js, observer.js) + local imports into
+//    flat classic-compatible files. The inliner state is reset per entry so
+//    shared modules are re-emitted for each bundle it needs.
 // ---------------------------------------------------------------------------
 
 function resolveLocal(fromFile, specifier) {
@@ -51,12 +53,28 @@ function inline(filePath) {
     },
   );
 
+  // Re-exports (export { x } from "./y") pull no new code — the target module
+  // is already inlined by its import — so drop the statement whole.
+  // Must run before the generic `export` strip below, which would otherwise
+  // leave a dangling `{ x } from "./y";` in the bundle.
+  src = src.replace(/^export\s*\{[^}]+\}\s*from\s*"\.\/[^"]+"\s*;?\s*$/gm, "");
+
   src = src.replace(/^export\s+/gm, "");
   const label = path.relative(srcDir, filePath);
   chunks.push(`// --- ${label} ---\n${src}\n`);
 }
 
-inline(path.join(srcDir, "service-worker.js"));
+function bundleEntry(entry) {
+  seen.clear();
+  chunks.length = 0;
+  inline(path.join(srcDir, entry));
+  return chunks.join("\n");
+}
+
+const swBundle = bundleEntry("service-worker.js");
+// observer.js is a CLASSIC content script (Firefox content scripts can't be
+// ES modules); its lib imports are inlined into one standalone file.
+const observerBundle = bundleEntry("observer.js");
 
 // ---------------------------------------------------------------------------
 // 2. Write the per-browser distributions
@@ -87,13 +105,14 @@ function emitDist(dir, extraSkip = []) {
   }
 }
 
-// --- Firefox (background.scripts + bundled single-file SW) ---
-// Drop the module SW (service-worker.js); write the bundled one explicitly.
-emitDist(distDir, ["service-worker.js"]);
+// --- Firefox (background.scripts + bundled single-file SW + bundled observer) ---
+// Drop the module SW and the importing observer; write the bundled versions.
+emitDist(distDir, ["service-worker.js", "observer.js"]);
 fs.writeFileSync(
   path.join(distDir, "service-worker.bundled.js"),
-  chunks.join("\n"),
+  swBundle,
 );
+fs.writeFileSync(path.join(distDir, "observer.js"), observerBundle);
 
 const firefoxManifest = JSON.parse(
   fs.readFileSync(path.join(srcDir, "manifest.firefox.json"), "utf8"),
@@ -104,8 +123,10 @@ fs.writeFileSync(
 );
 
 // --- Chrome / Edge (service_worker + ES-module SW + lib/ imports) ---
-// Keep service-worker.js and lib/; drop the bundled SW + tests dir.
-emitDist(distDevDir, ["service-worker.bundled.js", "tests"]);
+// Keep the module SW + lib/; drop the bundled SW + tests dir and the
+// importing observer (replaced by the bundled classic observer.js).
+emitDist(distDevDir, ["service-worker.bundled.js", "tests", "observer.js"]);
+fs.writeFileSync(path.join(distDevDir, "observer.js"), observerBundle);
 
 const chromeManifest = JSON.parse(
   fs.readFileSync(path.join(srcDir, "manifest.json"), "utf8"),

@@ -20,11 +20,11 @@
  *   'unsafe-inline') handlers are still blocked — a conservative failure.
  */
 
-export const MODES = Object.freeze({
-  OBSERVE: "observe",
-  FIRST_PARTY_ONLY: "firstPartyOnly",
-  NO_SCRIPTS: "noScripts",
-});
+import { MODES, PRESETS } from "./flags.js";
+
+// Modes now live in lib/flags.js (the flag bundle is the source of truth);
+// re-exporting keeps existing importers working.
+export { MODES } from "./flags.js";
 
 const MODE_VALUES = new Set(Object.values(MODES));
 
@@ -70,23 +70,34 @@ export const DEFAULT_MODE = MODES.OBSERVE;
 const SHA256_RE = /^sha256-[A-Za-z0-9+/]{40,}={0,2}$/;
 
 /**
- * Composes the CSP for a mode plus optional per-site allowances.
+ * Composes a CSP from a flag bundle plus optional per-site allowances.
  * Allowance items (strings) are routed by shape:
  * - "https://origin"            → script-src source
  * - "sha256-BASE64"             → script-src hash (allows one inline script)
  * - "attr-sha256-BASE64"        → script-src-attr hash (allows one handler)
  *
- * firstPartyOnly: `'self'` + origins + script hashes.
- * noScripts: origins + script hashes only (`'none'` while all lists are empty).
+ * The posture (what `script-src` is rooted at) is derived from flags:
+ * - blockExternalScripts                       → `'none'` (origins replace it)
+ * - blockThirdPartyScripts                     → `'self'` (+ origins)
+ * - only blockClassicScripts + blockModuleScripts → `*` (block inline, allow all external)
+ * - no executable/attr flag set               → null (container/report-only bundle;
+ *   those flags are served by the DOM/reporting layer, not CSP)
+ *
+ * Combos that would require allowing inline execution while enforcing
+ * handlers — any enforced posture with blockClassicScripts/blockModuleScripts
+ * off, or attr-only bundles — are unexpressible because the extension never
+ * emits 'unsafe-inline'; composePolicyFromFlags throws so the service worker
+ * can never deploy a broken header.
+ *
  * Attr hashes replace `script-src-attr 'none'`; without them handlers stay dead.
  *
- * @param {string} mode one of MODES
+ * @param {{[K in keyof typeof import("./flags.js").DEFAULT_FLAGS]: boolean}} flags
  * @param {{origins?: string[], scriptHashes?: string[], attrHashes?: string[]}} [allows]
- * @returns {string | null} policy value or null for observe
+ * @returns {string | null} policy value or null when the bundle needs no CSP
  */
-export function composePolicy(mode, allows = {}) {
-  const base = CSP_POLICIES[mode];
-  if (!base) return null;
+export function composePolicyFromFlags(flags, allows = {}) {
+  const posture = postureOf(flags);
+  if (posture.head === null) return null;
 
   const origins = dedupe((allows.origins ?? []).map(normalizeOrigin).filter(Boolean));
   const scriptHashes = dedupe(
@@ -99,19 +110,63 @@ export function composePolicy(mode, allows = {}) {
       .filter((h) => SHA256_RE.test(h)),
   );
 
-  if (origins.length === 0 && scriptHashes.length === 0 && attrHashes.length === 0) {
-    return base;
-  }
   const srcParts = [...origins, ...scriptHashes];
   const scriptSrc =
-    mode === MODES.FIRST_PARTY_ONLY
-      ? ["'self'", ...srcParts].join(" ")
-      : srcParts.length > 0
+    posture.head === "'none'"
+      ? srcParts.length > 0
         ? srcParts.join(" ")
-        : "'none'";
+        : "'none'"
+      : [posture.head, ...srcParts].join(" ");
   const attrDirective =
     attrHashes.length > 0 ? `script-src-attr ${attrHashes.join(" ")}` : "script-src-attr 'none'";
   return `script-src ${scriptSrc}; ${attrDirective}; object-src 'none'; base-uri 'none'`;
+}
+
+/**
+ * Composes the CSP for a mode (preset) plus optional per-site allowances —
+ * a thin wrapper over composePolicyFromFlags so the presets and the flat flag
+ * model can never drift.
+ *
+ * @param {string} mode one of MODES
+ * @param {{origins?: string[], scriptHashes?: string[], attrHashes?: string[]}} [allows]
+ * @returns {string | null} policy value or null for observe
+ */
+export function composePolicy(mode, allows = {}) {
+  if (!isMode(mode)) return null;
+  return composePolicyFromFlags(PRESETS[mode], allows);
+}
+
+const NON_EXPRESSIBLE_REASON =
+  "flag combination is not expressible without emitting 'unsafe-inline'";
+
+/**
+ * Root `script-src` source for a flag bundle, or null when the bundle needs
+ * no CSP at all. Throws for postures this extension refuses to deploy.
+ */
+function postureOf(flags) {
+  const wantsCsp =
+    flags.blockExternalScripts ||
+    flags.blockThirdPartyScripts ||
+    flags.blockClassicScripts ||
+    flags.blockModuleScripts ||
+    flags.blockInlineEventHandlers ||
+    flags.blockJavascriptUrls;
+
+  if (!wantsCsp) {
+    // Container/report-only bundles are served by the DOM/reporting layer.
+    return { head: null };
+  }
+
+  if (!flags.blockClassicScripts || !flags.blockModuleScripts) {
+    throw new Error(NON_EXPRESSIBLE_REASON);
+  }
+
+  const head = flags.blockExternalScripts
+    ? "'none'"
+    : flags.blockThirdPartyScripts
+      ? "'self'"
+      : "*";
+  return { head };
 }
 
 function dedupe(list) {
