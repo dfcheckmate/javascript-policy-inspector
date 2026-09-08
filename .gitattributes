@@ -2,3 +2,14 @@
 /.yarn/releases/*    binary
 /.yarn/plugins/**/*  binary
 /.pnp.*              binary linguist-generated
+
+# Treat binary assets as binary so git never rewrites line endings
+*.png binary
+*.ico binary
+*.jpeg binary
+*.jpg binary
+*.gif binary
+*.webp binary
+*.crx binary
+*.xpi binary
+*.pem binary

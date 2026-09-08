@@ -1,5 +1,5 @@
 import { DEFAULT_MODE, POLICY_SUMMARY, composeHeader } from "./lib/policies.js";
-import { normalizeHostForRule, ruleIdFor } from "./lib/rules.js";
+import { normalizeHostForRule } from "./lib/rules.js";
 import { beautify } from "./lib/beautify.js";
 import { highlight } from "./lib/highlight.js";
 
@@ -48,23 +48,13 @@ function render(mode) {
   els.summary.textContent = POLICY_SUMMARY[mode] ?? "";
 }
 
-/** Shows whether a DNR rule actually exists for this host right now.
- *  Normalizes getDynamicRules() across Chromium builds (see service-worker). */
-async function renderRuleStatus(target) {
-  if (!target) {
-    els.rule.textContent = "";
-    return;
-  }
-  try {
-    const result = await chrome.declarativeNetRequest.getDynamicRules();
-    const rules = Array.isArray(result) ? result : (result?.rules ?? []);
-    const rule = rules.find((r) => r.id === ruleIdFor(target));
-    els.rule.textContent = rule
-      ? `CSP rule: ACTIVE → ${rule.action.responseHeaders[0].value}`
-      : "CSP rule: none (Observe or not applied)";
-  } catch (err) {
-    els.rule.textContent = `CSP rule: error — ${err}`;
-  }
+/** Shows the CSP the extension would enforce for this host, as computed by
+ *  the service worker (collision-free rule IDs make client-side lookup by
+ *  raw hash unreliable). */
+function renderRuleStatus(activeCsp) {
+  els.rule.textContent = activeCsp
+    ? `CSP rule: ACTIVE → ${activeCsp}`
+    : "CSP rule: none (Observe or not applied)";
 }
 
 function fmtClock(ts) {
@@ -116,7 +106,7 @@ async function refreshUi() {
   renderPaused(state.pausedUntil);
   renderTabOverride(Boolean(state.tabOverride));
   renderExceptions(state.exceptions);
-  await renderRuleStatus(host);
+  renderRuleStatus(state.activeCsp);
   await loadActivity();
 }
 
@@ -440,6 +430,21 @@ async function showSource(rawText, url) {
   let text = rawText;
   if (text == null && url) {
     els.sourceCode.textContent = "loading…";
+    // Cross-origin fetches run with the extension's broader host permissions.
+    // Guard against probing internal/HSTS-only hosts by requiring an explicit
+    // user confirmation before fetching an origin outside the current site.
+    let foreign = false;
+    try {
+      const u = new URL(url);
+      foreign = normalizeHostForRule(u.hostname) !== host;
+    } catch {
+      foreign = false;
+    }
+    if (foreign && !confirm(`Fetch script source from ${originOf(url)}?`)) {
+      els.sourceCode.textContent = "Fetch cancelled by user.";
+      els.sourceView.hidden = false;
+      return;
+    }
     try {
       const resp = await fetch(url, { credentials: "omit" });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);

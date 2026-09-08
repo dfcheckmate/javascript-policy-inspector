@@ -1,6 +1,7 @@
 import {
   DEFAULT_MODE,
   MODES,
+  composePolicy,
   isMode,
   normalizeOrigin,
 } from "./lib/policies.js";
@@ -21,6 +22,7 @@ const MAX_EVENTS_PER_TAB = 200;
 const MAX_NET_PER_TAB = 300;
 const NET_FLUSH_MS = 400;
 const PAUSE_MS = 10 * 60 * 1000;
+const MAX_PAUSE_MS = 24 * 60 * 60 * 1000;
 
 /** @param {number} tabId */
 const eventsKey = (tabId) => `tabEvents:${tabId}`;
@@ -72,7 +74,7 @@ function computeEffectiveHosts(modes) {
   const byHost = new Map();
   for (const raw of Object.keys(modes)) {
     const h = normalizeHostForRule(raw);
-    if (h && modes[normalizeHostForRule(h)] !== MODES.OBSERVE && !byHost.has(h)) {
+    if (h && modes[h] !== MODES.OBSERVE && !byHost.has(h)) {
       byHost.set(h, modes[h]);
     }
   }
@@ -278,7 +280,7 @@ async function ingestEvents(tabId, incoming) {
     [key]: merged,
     [statsKey(tabId)]: computeStats(merged),
   });
-  await refreshBadge();
+  refreshBadgeDebounced();
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +362,9 @@ chrome.webRequest.onBeforeRequest.addListener(
     });
     buf.entries.push(entry);
     // redirects reuse the requestId; last onBeforeRequest wins
-    buf.byReqId.set(details.requestId, entry);
+    if (buf.byReqId.size < MAX_NET_PER_TAB) {
+      buf.byReqId.set(details.requestId, entry);
+    }
     if (buf.entries.length > 25) void flushNetNow(details.tabId);
     else scheduleNetFlush(details.tabId);
   },
@@ -413,13 +417,17 @@ async function syncRules() {
       getPaused(),
     ]);
     const now = Date.now();
+    let changed = false;
     for (const [host, entry] of Object.entries(paused)) {
-      if (entry?.until <= now && modes[host] === MODES.OBSERVE) {
-        modes[host] = entry.mode ?? DEFAULT_MODE;
+      // Migration: pre-0.3.6 entries stored a bare timestamp, not { until }.
+      const until = typeof entry === "number" ? entry : entry?.until;
+      if (typeof until === "number" && until <= now && modes[host] === MODES.OBSERVE) {
+        modes[host] = entry?.mode ?? DEFAULT_MODE;
         delete paused[host];
+        changed = true;
       }
     }
-    if (Object.keys(paused).length !== Object.values(paused).length) {
+    if (changed) {
       // prune happened above only when resuming; persist restored modes
       await chrome.storage.local.set({ [SITE_MODES_KEY]: modes, [PAUSED_KEY]: paused });
     }
@@ -522,6 +530,22 @@ async function refreshBadge() {
   }
 }
 
+/**
+ * Trailing-debounced refreshBadge for high-frequency callers (observer event
+ * ingestion ~every 250ms). The underlying refreshBadge does 5+ async storage
+ * reads per call; coalescing bursts into one call per 500ms of quiet avoids
+ * wedging the event-page with sustained work. State-change paths (syncRules,
+ * tab listeners) still call refreshBadge() directly for immediate feedback.
+ */
+let scheduledBadge = null;
+function refreshBadgeDebounced() {
+  if (scheduledBadge !== null) return;
+  scheduledBadge = setTimeout(() => {
+    scheduledBadge = null;
+    refreshBadge().catch(() => {});
+  }, 500);
+}
+
 /** @param {string | undefined} url @returns {string | null} */
 function hostForUrl(url) {
   if (!url) return null;
@@ -560,7 +584,7 @@ async function pauseHost(host, ms) {
   const paused = await getPaused();
   const key = canon(host);
   const until = Date.now() + ms;
-  paused[key] = until;
+  paused[key] = { until };
   await chrome.storage.local.set({ [PAUSED_KEY]: paused });
   await chrome.alarms.create(`resume:${key}`, { when: until });
   await syncRules();
@@ -708,10 +732,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const state = {
           host: key,
           mode: siteModes[key] ?? DEFAULT_MODE,
-          pausedUntil: key in paused ? paused[key] : null,
+          pausedUntil:
+            key in paused
+              ? typeof paused[key] === "number"
+                ? paused[key]
+                : paused[key]?.until ?? null
+              : null,
           exceptions: exceptions[key] ?? [],
           inlineAllows: inlineAllows[key] ?? { scripts: [], attrs: [] },
         };
+        state.activeCsp = composePolicy(state.mode, {
+          origins: exceptions[key] ?? [],
+          scriptHashes: inlineAllows[key]?.scripts ?? [],
+          attrHashes: inlineAllows[key]?.attrs ?? [],
+        });
         state.tabOverride =
           typeof msg.tabId === "number" && (await isTabOverridden(msg.tabId));
         sendResponse(state);
@@ -747,10 +781,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         break;
       }
       case "pause-host": {
-        const ms =
+        const ms = Math.min(
           typeof msg.ms === "number" && Number.isFinite(msg.ms) && msg.ms > 0
             ? msg.ms
-            : PAUSE_MS;
+            : PAUSE_MS,
+          MAX_PAUSE_MS,
+        );
         sendResponse(await pauseHost(msg.host, ms));
         break;
       }

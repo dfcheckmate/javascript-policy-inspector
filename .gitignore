@@ -28,6 +28,9 @@ service-worker.bundled.js
 .env.*
 !.env.exampled
 
+# Store listing copy — maintained out-of-repo, not part of the codebase
+AMO-listing.md
+
 # IDE
 *.vscode
 

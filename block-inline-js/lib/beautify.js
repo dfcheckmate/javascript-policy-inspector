@@ -11,6 +11,10 @@
  * Deliberately formats rather than deobfuscates: minified-but-plain scripts
  * become readable (the common case); packed/obfuscated payloads would require
  * an AST engine, which is a separate, heavier effort.
+ *
+ * NOTE: the lexer (tokenize, scan-string/template/regex, isRegexStart) is
+ * shared in pattern with lib/highlight.js — keep edge-case fixes in sync
+ * between the two files.
  */
 
 const IDENT_CHAR = /[A-Za-z0-9_$]/;
@@ -302,7 +306,6 @@ export function beautify(src) {
     .join("\n")
     .replace(/\n(\s*)\}\s*else(\s*)\{/g, "\n$1} else {")
     .replace(/\n(\s*)\}\s*catch/g, "\n$1} catch")
-    .replace(/\n(\s*)\}\s*final/g, "\n$1} final")
     .replace(/\n(\s*)\}\s*while/g, "\n$1} while");
 }
 

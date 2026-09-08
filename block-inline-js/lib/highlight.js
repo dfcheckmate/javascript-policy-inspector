@@ -12,6 +12,10 @@
  * Returns plain structured data — the caller renders it with DOM
  * createElement/textContent (never innerHTML), so untrusted source can't
  * inject markup.
+ *
+ * NOTE: the lexer (scanQuote/scanTemplate/scanRegex/isRegex/skipWhile) is
+ * shared in pattern with lib/beautify.js — keep edge-case fixes in sync
+ * between the two files.
  */
 
 const IDENT_CHAR = /[A-Za-z0-9_$]/;
