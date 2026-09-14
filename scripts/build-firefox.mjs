@@ -107,7 +107,7 @@ function emitDist(dir, extraSkip = []) {
 
 // --- Firefox (background.scripts + bundled single-file SW + bundled observer) ---
 // Drop the module SW and the importing observer; write the bundled versions.
-emitDist(distDir, ["service-worker.js", "observer.js"]);
+emitDist(distDir, ["service-worker.js", "observer.js", "tests"]);
 fs.writeFileSync(
   path.join(distDir, "service-worker.bundled.js"),
   swBundle,

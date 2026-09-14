@@ -1,9 +1,12 @@
 import {
-  DEFAULT_MODE,
-  POLICY_SUMMARY,
   composePolicyFromFlags,
 } from "./lib/policies.js";
-import { FLAG_KEYS, makeFlags, modeForFlags } from "./lib/flags.js";
+import {
+  FLAG_KEYS,
+  makeFlags,
+  nearestPreset,
+  enforceInlineBase,
+} from "./lib/flags.js";
 import { normalizeHostForRule } from "./lib/host.js";
 import { beautify } from "./lib/beautify.js";
 import { highlight } from "./lib/highlight.js";
@@ -13,7 +16,8 @@ const els = {
   summary: document.getElementById("summary"),
   rule: document.getElementById("rule"),
   reload: document.getElementById("reload"),
-  radios: () => document.querySelectorAll('input[name="mode"]'),
+  modeLabel: document.getElementById("mode-label"),
+  modeDetail: document.getElementById("mode-detail"),
   pause: document.getElementById("pause"),
   pauseState: document.getElementById("pause-state"),
   allowTab: document.getElementById("allow-tab"),
@@ -29,10 +33,19 @@ const els = {
   relax: () => document.querySelectorAll("[data-pause-min]"),
   profileBadge: document.getElementById("profile-badge"),
   botWarning: document.getElementById("bot-warning"),
-  advanced: document.getElementById("advanced"),
   flagControls: document.getElementById("flag-controls"),
   removalHint: document.getElementById("removal-hint"),
-  persistNote: document.getElementById("persist-note"),
+  resetSite: document.getElementById("reset-site"),
+  resetTab: document.getElementById("reset-tab"),
+  inventory: document.getElementById("inventory"),
+  detail: document.getElementById("detail"),
+  activity: document.getElementById("activity"),
+  allowNote: document.getElementById("allow-note"),
+  allowNoteText: document.getElementById("allow-note-text"),
+  allowNoteReload: document.getElementById("allow-note-reload"),
+  allowNoteDismiss: document.getElementById("allow-note-dismiss"),
+  debugBar: document.getElementById("debug-bar"),
+  debugCopy: document.getElementById("debug-copy"),
 };
 
 /** @type {string | null} */
@@ -41,7 +54,7 @@ let host = null;
 let tabId = null;
 
 // ---------------------------------------------------------------------------
-// advanced profile UI (per-category flags)
+// flag model (11 flags = source of truth; presets are named combinations)
 // ---------------------------------------------------------------------------
 
 const FLAG_LABELS = {
@@ -56,6 +69,28 @@ const FLAG_LABELS = {
   blockJsonLd: "Remove JSON-LD data",
   blockJsonData: "Remove JSON data blocks",
   reportBlockedContent: "Report blocked content to activity",
+};
+
+/** Short names for the condensed mode readout deltas. */
+const SHORT_FLAG = {
+  blockClassicScripts: "classic scripts",
+  blockModuleScripts: "module scripts",
+  blockExternalScripts: "external scripts",
+  blockThirdPartyScripts: "3rd-party",
+  blockInlineEventHandlers: "on* handlers",
+  blockJavascriptUrls: "javascript: URLs",
+  blockImportMaps: "import maps",
+  blockSpeculationRules: "spec rules",
+  blockJsonLd: "JSON-LD",
+  blockJsonData: "JSON-data",
+  reportBlockedContent: "report",
+};
+
+/** Human names for the derived preset readout. */
+const MODE_LABELS = {
+  observe: "Observe",
+  firstPartyOnly: "First-party only",
+  noScripts: "No scripts",
 };
 
 /** Flags that make the DOM layer remove non-executing containers. */
@@ -89,16 +124,63 @@ function isBotDetectorHost(host) {
   return BOT_DETECTOR_SUFFIXES.some((s) => h === s || h.endsWith(`.${s}`));
 }
 
-function renderFlagControls(flags) {
+/**
+ * Live count for a flag, mapped from the per-tab stats. Boundaries with no
+ * direct counter (module vs classic scripts) render no badge.
+ * @param {string} key
+ * @param {object | null} stats
+ * @returns {number | null}
+ */
+function flagCountFor(key, stats) {
+  if (!stats) return null;
+  switch (key) {
+    case "blockClassicScripts":
+      return stats.inlineScripts ?? 0;
+    case "blockModuleScripts":
+      return null;
+    case "blockExternalScripts":
+      return (stats.scriptsFirstParty ?? 0) + (stats.scriptsThirdParty ?? 0);
+    case "blockThirdPartyScripts":
+      return stats.scriptsThirdParty ?? 0;
+    case "blockInlineEventHandlers":
+      return stats.inlineHandlers ?? 0;
+    case "blockJavascriptUrls":
+      return stats.javascriptUrls ?? 0;
+    case "blockImportMaps":
+      return stats.importMaps ?? 0;
+    case "blockSpeculationRules":
+      return stats.specRules ?? 0;
+    case "blockJsonLd":
+      return stats.jsonLd ?? 0;
+    case "blockJsonData":
+      return stats.jsonData ?? 0;
+    case "reportBlockedContent":
+      return stats.blocked ?? 0;
+    default:
+      return null;
+  }
+}
+
+function renderFlagControls(flags, stats) {
   els.flagControls.replaceChildren();
   for (const key of FLAG_KEYS) {
     const label = document.createElement("label");
-    label.className = "flag";
+    label.className = "flag-row";
     const cb = document.createElement("input");
     cb.type = "checkbox";
     cb.checked = Boolean(flags[key]);
     cb.dataset.flag = key;
-    label.append(cb, document.createTextNode(` ${FLAG_LABELS[key] ?? key}`));
+    const name = document.createElement("span");
+    name.className = "flag-name";
+    name.textContent = FLAG_LABELS[key] ?? key;
+    label.append(cb, name);
+    const count = flagCountFor(key, stats);
+    if (count != null) {
+      const badge = document.createElement("span");
+      badge.className = `flag-count${count > 0 ? " hot" : ""}`;
+      badge.textContent = count;
+      label.append(badge);
+    }
     els.flagControls.append(label);
   }
 }
@@ -118,7 +200,7 @@ function setFlagError(message, ref) {
       p = document.createElement("p");
       p.id = "flag-error";
       p.className = "hint warn";
-      els.advanced.before(p);
+      els.flagControls.before(p);
     }
     p.textContent = message;
   } else {
@@ -127,11 +209,23 @@ function setFlagError(message, ref) {
   ref?.scrollIntoView?.({ block: "nearest" });
 }
 
-function updateProfileBadge(flags) {
-  els.profileBadge.textContent =
-    modeForFlags(flags) === null
-      ? "Custom profile — the flags below differ from the presets above."
-      : "Preset profile — matches one of the modes above.";
+function setFlagNote(message) {
+  let p = document.getElementById("flag-note");
+  if (!p) {
+    p = document.createElement("p");
+    p.id = "flag-note";
+    p.className = "hint";
+    els.flagControls.before(p);
+  }
+  p.textContent = message;
+}
+
+function showNote(message) {
+  setFlagNote(message);
+}
+
+function clearNote() {
+  document.getElementById("flag-note")?.remove();
 }
 
 function updateRemovalHint(flags) {
@@ -158,9 +252,53 @@ function updateBotWarning(flags) {
   }
 }
 
-function renderMode(mode) {
-  for (const radio of els.radios()) radio.checked = radio.value === mode;
-  els.summary.textContent = POLICY_SUMMARY[mode] ?? "";
+/**
+ * Truthful one-liner for the ACTUAL flag bundle — never the neighbor preset's
+ * canned line. An exact preset shows its own summary; custom bundles describe
+ * the enforced posture so the readout can't claim "all allowed" while the CSP
+ * rule is active.
+ */
+function summaryForFlags(flags) {
+  if (flags.blockExternalScripts) {
+    return "External and inline scripts blocked; only allowed hashes/origins run.";
+  }
+  if (flags.blockThirdPartyScripts) {
+    return "Same-origin scripts only; inline JS and third-party scripts are blocked.";
+  }
+  if (flags.blockClassicScripts && flags.blockModuleScripts) {
+    return "Inline scripts blocked; external scripts are allowed.";
+  }
+  return "All scripts allowed. Activity is being observed.";
+}
+
+/**
+ * Derived mode readout: flags are the source of truth; the mode label is just
+ * a name for a combination. Exact preset → its name and "matches preset" —
+ * custom → "Custom" plus the nearest-preset deltas, in ± notation.
+ */
+function renderModeReadout(flags) {
+  const result = nearestPreset(flags);
+  const presetMode = result?.mode;
+  const exact = result && result.deltas.length === 0;
+  els.modeLabel.textContent = exact
+    ? MODE_LABELS[presetMode] ?? presetMode
+    : "Custom";
+  els.summary.textContent = summaryForFlags(flags);
+  els.profileBadge.textContent = "";
+  if (exact) {
+    els.modeDetail.textContent = "matches preset";
+  } else {
+    const base = presetMode ? `${MODE_LABELS[presetMode] ?? presetMode} + ` : "";
+    const parts = (result?.deltas ?? []).map(
+      ({ key, on }) => `${on ? "+" : "\u2212"}${SHORT_FLAG[key] ?? key}`,
+    );
+    els.modeDetail.textContent =
+      parts.length > 0
+        ? parts.join(" · ")
+        : "no presets apply";
+    els.profileBadge.textContent =
+      `Custom profile — closest to ${base.slice(0, -3)}; toggles below reflect this exact combination.`;
+  }
 }
 
 /** Resolves hostname + tab id of the active tab; null when unsupported. */
@@ -177,12 +315,10 @@ async function activeTabContext() {
   return { host: normalizeHostForRule(url.hostname), tabId: tab.id };
 }
 
-/** Shows the CSP the extension would enforce for this host, as computed by
- *  the service worker (collision-free rule IDs make client-side lookup by
- *  raw hash unreliable). */
+/** Shows the CSP the extension would enforce, per the service worker's activeCsp. */
 function renderRuleStatus(activeCsp) {
   els.rule.textContent = activeCsp
-    ? `CSP rule: ACTIVE → ${activeCsp}`
+    ? `CSP rule: ACTIVE \u2192 ${activeCsp}`
     : "CSP rule: none (Observe or not applied)";
 }
 
@@ -192,13 +328,49 @@ function fmtClock(ts) {
   return `${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+function fmtTime(ts) {
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+// ---------------------------------------------------------------------------
+// pause (host-scoped, alarm-driven in the SW; live countdown here)
+// ---------------------------------------------------------------------------
+
+let lastPausedUntil = null;
+let pauseTicker = null;
+
 function renderPaused(pausedUntil) {
+  lastPausedUntil = pausedUntil;
   const active = typeof pausedUntil === "number" && pausedUntil > Date.now();
   els.pause.classList.toggle("active", active);
   els.pause.textContent = active ? "Resume now" : "Pause";
-  els.pauseState.textContent = active
-    ? `Policy paused until ${fmtClock(pausedUntil)}`
-    : "";
+  for (const btn of els.relax()) btn.disabled = active;
+  if (active) {
+    const secs = Math.max(0, Math.ceil((pausedUntil - Date.now()) / 1000));
+    els.pauseState.textContent = `Policy paused \u2014 ${Math.floor(secs / 60)}m ${String(
+      secs % 60,
+    ).padStart(2, "0")}s remaining`;
+    if (pauseTicker === null) {
+      pauseTicker = setInterval(() => {
+        const until = lastPausedUntil;
+        if (typeof until === "number" && until <= Date.now()) {
+          clearInterval(pauseTicker);
+          pauseTicker = null;
+          refreshUi().catch(() => {});
+          return;
+        }
+        renderPaused(until);
+      }, 1000);
+    }
+  } else {
+    if (pauseTicker !== null) {
+      clearInterval(pauseTicker);
+      pauseTicker = null;
+    }
+    els.pauseState.textContent = "";
+  }
 }
 
 function renderTabOverride(active) {
@@ -221,26 +393,129 @@ function renderExceptions(list) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// trace / diagnostics (gated off unless Alt is held / #debug hash; always
+// records a short bounded tail for the "Copy diagnostics" dump)
+// ---------------------------------------------------------------------------
+
+const MAX_TRACE = 80;
+const traceLog = [];
+let debugOn = location.hash === "#debug";
+let lastStateSnapshot = null;
+
+/** sendMessage wrapper: records outcome + latency, surfaces errors loudly. */
+async function traceSend(message) {
+  const start = Date.now();
+  const rec = {
+    t: fmtTime(start),
+    type: message?.type ?? "?",
+    ms: 0,
+    ok: false,
+    detail: null,
+  };
+  traceLog.push(rec);
+  if (traceLog.length > MAX_TRACE) traceLog.shift();
+  try {
+    const res = await chrome.runtime.sendMessage(message);
+    rec.ms = Date.now() - start;
+    rec.ok = !(res && res.error);
+    rec.detail = res?.error ? String(res.error) : null;
+    if (debugOn) {
+      console.log(
+        `[trace] ${rec.type} \u2192 ${rec.ok ? "ok" : "FAIL"} (${rec.ms}ms)` +
+          (rec.detail ? ` ${rec.detail}` : ""),
+      );
+    }
+    return res;
+  } catch (err) {
+    rec.ms = Date.now() - start;
+    rec.ok = false;
+    rec.detail = String(err?.message ?? err);
+    if (debugOn) {
+      console.error(`[trace] ${rec.type} \u2192 THREW (${rec.ms}ms) ${rec.detail}`);
+    }
+    throw err;
+  }
+}
+
+function enableDebug() {
+  debugOn = true;
+  els.debugBar.hidden = false;
+}
+
+function copyDiagnostics() {
+  const body = JSON.stringify(
+    { host, tabId, state: lastStateSnapshot, trace: traceLog.slice(-60) },
+    null,
+    2,
+  );
+  navigator.clipboard
+    ?.writeText?.(body)
+    .then(() => showAllowNote("Diagnostics copied to clipboard.", false))
+    .catch(() => showAllowNote("Clipboard unavailable.", false));
+}
+
+function showAllowNote(text, hasReload) {
+  els.allowNote.hidden = false;
+  els.allowNoteText.textContent = text;
+  els.allowNoteReload.hidden = !hasReload;
+}
+
+function hideAllowNote() {
+  els.allowNote.hidden = true;
+}
+
+window.addEventListener("error", (event) => {
+  traceLog.push({
+    t: fmtTime(Date.now()),
+    type: "window.error",
+    ok: false,
+    detail: String(event?.message ?? event),
+  });
+  if (debugOn) showAllowNote(`JS error: ${event?.message ?? ""}`, false);
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  traceLog.push({
+    t: fmtTime(Date.now()),
+    type: "unhandledrejection",
+    ok: false,
+    detail: String(event?.reason?.message ?? event?.reason),
+  });
+  if (debugOn) {
+    showAllowNote(
+      `Unhandled rejection: ${event?.reason?.message ?? ""}`,
+      false,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// state hydration
+// ---------------------------------------------------------------------------
+
+let lastFlags = null;
+let lastStats = null;
+
 async function refreshUi() {
   if (!host) return;
-  const state = await chrome.runtime.sendMessage({
-    type: "get-state",
-    host,
-    tabId,
-  });
+  const state = await traceSend({ type: "get-state", host, tabId });
   if (state?.error) return;
+  lastStateSnapshot = state;
+  lastFlags = state.flags ?? null;
+  const exceptions = state.exceptions ?? [];
+  const containerAllows = state.containerAllows ?? [];
   lastInlineAllows = state.inlineAllows ?? { scripts: [], attrs: [] };
-  lastExceptions = state.exceptions ?? [];
-  lastContainerAllows = state.containerAllows ?? [];
-  renderMode(state.mode ?? DEFAULT_MODE);
+  lastExceptions = exceptions;
+  lastContainerAllows = containerAllows;
+  renderModeReadout(state.flags);
   renderRuleStatus(state.activeCsp);
-  renderFlagControls(state.flags);
-  updateProfileBadge(state.flags);
+  renderFlagControls(state.flags, lastStats);
   updateRemovalHint(state.flags);
   updateBotWarning(state.flags);
   renderPaused(state.pausedUntil);
   renderTabOverride(Boolean(state.tabOverride));
-  renderExceptions(state.exceptions);
+  renderExceptions(exceptions);
   await loadActivity();
 }
 
@@ -248,33 +523,20 @@ async function refreshUi() {
 // event wiring
 // ---------------------------------------------------------------------------
 
-els.radios().forEach((radio) =>
-  radio.addEventListener("change", async () => {
-    if (!host || !radio.checked) return;
-    const res = await chrome.runtime.sendMessage({
-      type: "set-mode",
-      host,
-      mode: radio.value,
-    });
-    if (res?.error) {
-      els.summary.textContent = `Error: ${res.error}`;
-      return;
-    }
-    await refreshUi();
-  }),
-);
-
-// Advanced per-category toggles. A bundle the engine can never deploy (any
-// enforced posture that would need 'unsafe-inline' — e.g. blocking external
-// scripts while inline scripts stay allowed) is refused and the checkbox
-// reverted, so the popup can never store a dead profile.
+// Per-category toggles. Some enforced postures — e.g. blocking external
+// scripts while inline stays allowed — would need 'unsafe-inline', which the
+// engine never emits (INLINE INVARIANT). Instead of rejecting those toggles,
+// the popup auto-enables the inline-blocking pair (classic + module) that
+// makes the bundle expressible and tells the user what it did.
 els.flagControls.addEventListener("change", async (event) => {
   const cb = event.target.closest("input[data-flag]");
   if (!cb || !host) return;
-  const candidate = makeFlags(checkedFlags());
+  const raw = checkedFlags();
+  const { flags: candidate, autoEnabled } = enforceInlineBase(makeFlags(raw));
   try {
     composePolicyFromFlags(candidate);
   } catch (err) {
+    // Still unexpressible after the inline pair is forced on.
     cb.checked = !cb.checked;
     setFlagError(
       `Rejected: cannot express this combination without allowing inline ` +
@@ -284,11 +546,18 @@ els.flagControls.addEventListener("change", async (event) => {
     return;
   }
   setFlagError(null);
-  const res = await chrome.runtime.sendMessage({
-    type: "set-policy",
-    host,
-    flags: candidate,
-  });
+  if (autoEnabled.length > 0) {
+    const names = autoEnabled.map((k) => FLAG_LABELS[k]).join(" + ");
+    showNote(
+      `To enforce this securely, inline scripts must also be blocked — ` +
+        `${names} were ${autoEnabled.length === 1 ? "enabled" : "enabled"} for you ` +
+        `(the CSP layer never emits 'unsafe-inline'). This may stop some site ` +
+        `features from working; you can still Allow a specific script by sha256 hash.`,
+    );
+  } else {
+    clearNote();
+  }
+  const res = await traceSend({ type: "set-policy", host, flags: candidate });
   if (res?.error) {
     setFlagError(`Error: ${res.error}`, cb);
     return;
@@ -305,9 +574,8 @@ els.pause.addEventListener("click", async () => {
   if (!host) return;
   const active =
     els.pause.classList.contains("active") ||
-    (await chrome.runtime.sendMessage({ type: "get-state", host }))
-      ?.pausedUntil != null;
-  await chrome.runtime.sendMessage(
+    (await traceSend({ type: "get-state", host }))?.pausedUntil != null;
+  await traceSend(
     active ? { type: "resume-host", host } : { type: "pause-host", host },
   );
   await refreshUi();
@@ -318,21 +586,15 @@ for (const btn of els.relax()) {
   btn.addEventListener("click", async () => {
     if (!host) return;
     const ms = Number(btn.dataset.pauseMin) * 60 * 1000;
-    await chrome.runtime.sendMessage({ type: "pause-host", host, ms });
+    await traceSend({ type: "pause-host", host, ms });
     await refreshUi();
   });
 }
 
-// Copy a deployable CSP header for this host (built client-side, offline).
-// Uses the SW-computed activeCsp so presets AND custom profiles (and their
-// allowances) always produce the exact header the extension would enforce.
+// Copy a deployable CSP header for this host (SW-computed activeCsp).
 els.copyCsp.addEventListener("click", async () => {
   if (!host) return;
-  const state = await chrome.runtime.sendMessage({
-    type: "get-state",
-    host,
-    tabId,
-  });
+  const state = await traceSend({ type: "get-state", host, tabId });
   if (state?.error) {
     els.pauseState.textContent = state.error;
     return;
@@ -357,10 +619,7 @@ els.copyCsp.addEventListener("click", async () => {
 
 els.allowTab.addEventListener("click", async () => {
   if (tabId === null) return;
-  const res = await chrome.runtime.sendMessage({
-    type: "toggle-tab-override",
-    tabId,
-  });
+  const res = await traceSend({ type: "toggle-tab-override", tabId });
   if (res?.active) await chrome.tabs.reload(tabId);
   await refreshUi();
 });
@@ -370,13 +629,9 @@ els.excForm.addEventListener("submit", async (event) => {
   if (!host) return;
   const origin = els.excInput.value.trim();
   if (!origin) return;
-  const res = await chrome.runtime.sendMessage({
-    type: "add-exception",
-    host,
-    origin,
-  });
+  const res = await traceSend({ type: "add-exception", host, origin });
   if (res?.error) {
-    els.pauseState.textContent = `Error: ${res.error}`;
+    showAllowNote(`Error: ${res.error}`, false);
     return;
   }
   els.excInput.value = "";
@@ -386,16 +641,12 @@ els.excForm.addEventListener("submit", async (event) => {
 els.excList.addEventListener("click", async (event) => {
   const origin = event.target?.dataset?.origin;
   if (!origin || !host) return;
-  await chrome.runtime.sendMessage({
-    type: "remove-exception",
-    host,
-    origin,
-  });
+  await traceSend({ type: "remove-exception", host, origin });
   await refreshUi();
 });
 
 els.exportBtn.addEventListener("click", async () => {
-  const data = await chrome.runtime.sendMessage({ type: "export-settings" });
+  const data = await traceSend({ type: "export-settings" });
   if (data?.error) return;
   const blob = new Blob([JSON.stringify(data, null, 2)], {
     type: "application/json",
@@ -415,10 +666,7 @@ els.importFile.addEventListener("change", async () => {
   if (!file) return;
   try {
     const data = JSON.parse(await file.text());
-    const res = await chrome.runtime.sendMessage({
-      type: "import-settings",
-      data,
-    });
+    const res = await traceSend({ type: "import-settings", data });
     if (res?.error) {
       els.pauseState.textContent = `Import failed: ${res.error}`;
       return;
@@ -432,7 +680,88 @@ els.importFile.addEventListener("change", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// inventory / activity rendering
+// allow note (inline feedback + optional reload-to-apply)
+// ---------------------------------------------------------------------------
+
+els.allowNoteReload.addEventListener("click", async () => {
+  hideAllowNote();
+  if (tabId !== null) await chrome.tabs.reload(tabId);
+  await refreshUi();
+});
+
+els.allowNoteDismiss.addEventListener("click", hideAllowNote);
+
+// ---------------------------------------------------------------------------
+// reset controls (site reset is two-click armed; tab clear is one-shot)
+// ---------------------------------------------------------------------------
+
+let resetArmed = false;
+let resetTimer = null;
+
+function disarmReset() {
+  resetArmed = false;
+  if (resetTimer !== null) {
+    clearTimeout(resetTimer);
+    resetTimer = null;
+  }
+  els.resetSite.classList.remove("armed");
+  els.resetSite.textContent = "Reset this site";
+}
+
+async function doResetSite() {
+  const res = await traceSend({ type: "clear-site", host });
+  if (res?.error) {
+    showAllowNote(`Reset failed: ${res.error}`, false);
+    return;
+  }
+  els.pauseState.textContent = "Site reset to default (Observe).";
+  hideAllowNote();
+  if (tabId !== null) await chrome.tabs.reload(tabId);
+  await refreshUi();
+}
+
+els.resetSite.addEventListener("click", () => {
+  if (!host) return;
+  if (!resetArmed) {
+    resetArmed = true;
+    resetTimer = setTimeout(disarmReset, 3000);
+    els.resetSite.classList.add("armed");
+    els.resetSite.textContent = "Reset now?";
+    return;
+  }
+  disarmReset();
+  void doResetSite();
+});
+
+els.resetTab.addEventListener("click", async () => {
+  if (tabId === null) return;
+  const res = await traceSend({ type: "clear-tab", tabId });
+  if (res?.error) {
+    showAllowNote(`Clear failed: ${res.error}`, false);
+    return;
+  }
+  await refreshUi();
+});
+
+// ---------------------------------------------------------------------------
+// live updates: the SW broadcasts a fire-and-forget state-changed after any
+// policy/pause/override transition outside this popup's own action flow.
+// ---------------------------------------------------------------------------
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === "state-changed" && host) refreshUi().catch(() => {});
+});
+
+// Debug: press and hold Alt inside the popup (or open with #debug) to expose
+// the trace bar + clipboard diagnostics for a hard-to-describe bug.
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Alt" && !debugOn) enableDebug();
+});
+
+els.debugCopy.addEventListener("click", copyDiagnostics);
+
+// ---------------------------------------------------------------------------
+// inventory / activity rendering (ported from original; minor improvements)
 // ---------------------------------------------------------------------------
 
 const KIND_LABELS = {
@@ -444,14 +773,8 @@ const KIND_LABELS = {
   "javascript-url": "javascript: URL",
 };
 
-function fmtTime(ts) {
-  const d = new Date(ts);
-  const p = (n) => String(n).padStart(2, "0");
-  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
-
 function renderInventory(stats) {
-  const el = document.getElementById("inventory");
+  const el = els.inventory;
   el.replaceChildren();
   if (!stats) {
     const span = document.createElement("span");
@@ -490,7 +813,6 @@ function renderInventory(stats) {
   }
 }
 
-/** Dedupes events into rows keyed by their allow-identity. */
 function detailRows(view, events) {
   const matchers = {
     first: (e) => e.kind === "script" && e.party === "first",
@@ -524,7 +846,6 @@ function detailRows(view, events) {
     } else if (view === "inline-handler" && row.hash) {
       action = { kind: "attr", value: row.hash };
     } else if (view === "removed" && row.digest) {
-      // "Allow" = never remove this container again on this site.
       action = { kind: "container", value: row.digest };
     }
     return { ...row, action };
@@ -548,7 +869,6 @@ function appendDetailRow(
     badgeSpan.textContent = badgeValue;
     li.append(badgeSpan);
   }
-  // Inline preview or "view external source" affordance.
   if (source != null) {
     const details = document.createElement("details");
     details.className = "preview";
@@ -584,7 +904,6 @@ function appendDetailRow(
   el.append(li);
 }
 
-/** Renders formatted code into safe highlighted DOM spans. */
 function renderCodeSpans(src) {
   const spans = [];
   for (const tok of highlight(src)) {
@@ -596,14 +915,14 @@ function renderCodeSpans(src) {
   return spans;
 }
 
-/** Populates the shared source panel; fetches external scripts (user-initiated). */
+const FETCH_TIMEOUT_MS = 10_000;
+const FETCH_LIMIT_BYTES = 1024 * 1024;
+const RENDER_LIMIT_BYTES = 200 * 1024;
+
 async function showSource(rawText, url) {
   let text = rawText;
   if (text == null && url) {
-    els.sourceCode.textContent = "loading…";
-    // Cross-origin fetches run with the extension's broader host permissions.
-    // Guard against probing internal/HSTS-only hosts by requiring an explicit
-    // user confirmation before fetching an origin outside the current site.
+    els.sourceCode.textContent = "loading\u2026";
     let foreign = false;
     try {
       const u = new URL(url);
@@ -617,11 +936,20 @@ async function showSource(rawText, url) {
       return;
     }
     try {
-      const resp = await fetch(url, { credentials: "omit" });
+      const resp = await fetch(url, {
+        credentials: "omit",
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const buf = await resp.arrayBuffer();
-      if (buf.byteLength > 1024 * 1024) throw new Error("Source exceeds 1MB limit");
-      text = new TextDecoder().decode(buf);
+      const truncated = buf.byteLength > FETCH_LIMIT_BYTES;
+      text = new TextDecoder().decode(
+        truncated ? buf.slice(0, FETCH_LIMIT_BYTES) : buf,
+      );
+      if (truncated) {
+        text += `\n\n[truncated at ${(FETCH_LIMIT_BYTES / 1024).toFixed(0)} KB — ` +
+          `${((buf.byteLength - FETCH_LIMIT_BYTES) / 1024).toFixed(0)} KB omitted]`;
+      }
     } catch (err) {
       els.sourceCode.textContent = `Failed to load source: ${err.message}`;
       els.sourceView.hidden = false;
@@ -633,22 +961,29 @@ async function showSource(rawText, url) {
     els.sourceView.hidden = false;
     return;
   }
-  const fmt = beautify(text) || text;
-  els.sourceCode.replaceChildren();
-  const pre = els.sourceCode;
-  pre.append(...renderCodeSpans(fmt));
+  // When text is large, skip highlight/beautify (DOM flood + layout thrash)
+  // and render plain textContent for reliable, fast display.
+  if (text.length > RENDER_LIMIT_BYTES) {
+    els.sourceCode.replaceChildren();
+    els.sourceCode.textContent =
+      text + "\n\n[plain view — syntax highlight skipped for large window]";
+  } else {
+    const fmt = beautify(text) || text;
+    els.sourceCode.replaceChildren();
+    els.sourceCode.append(...renderCodeSpans(fmt));
+  }
   els.sourceView.hidden = false;
   if (url) {
     const label = document.createElement("div");
     label.className = "src-url";
     label.textContent = url;
-    pre.before(label);
+    els.sourceCode.before(label);
   }
   els.sourceView.open = true;
 }
 
 function renderDetail(view, events, inlineAllows, exceptions) {
-  const el = document.getElementById("detail");
+  const el = els.detail;
   const allowedSet = new Set([
     ...(inlineAllows?.scripts ?? []),
     ...(inlineAllows?.attrs ?? []),
@@ -656,9 +991,7 @@ function renderDetail(view, events, inlineAllows, exceptions) {
   ]);
   const excSet = new Set(exceptions ?? []);
   el.replaceChildren();
-  if (!view || !Array.isArray(events)) {
-    return;
-  }
+  if (!view || !Array.isArray(events)) return;
   const rows = detailRows(view, events);
   if (rows.length === 0) {
     const li = document.createElement("li");
@@ -668,15 +1001,11 @@ function renderDetail(view, events, inlineAllows, exceptions) {
     return;
   }
   if (view === "net") {
-    // Network request rows. Our CSP only gates *script* requests, so an
-    // Allow action (adding the request's origin to the site exceptions) is
-    // meaningful solely for script-type rows; every other type stays
-    // observation-only. Sensor/bot-management origins get a hint badge.
     for (const row of rows) {
       const badge =
-        `${row.type ?? ""}${row.status ? ` · ${row.status}` : " · …"}` +
-        (row.count > 1 ? ` · ×${row.count}` : "") +
-        (isBotDetectorOrigin(row.url) ? " · sensor" : "");
+        `${row.type ?? ""}${row.status ? ` \u2192 ${row.status}` : " \u2192 \u2026"}` +
+        (row.count > 1 ? ` \u00d7${row.count}` : "") +
+        (isBotDetectorOrigin(row.url) ? " \u2192 sensor" : "");
       const isBad = /ERR|FAILED/.test(row.status ?? "");
       const title = `${row.method} ${row.url}`;
       let allowKind = null;
@@ -706,7 +1035,7 @@ function renderDetail(view, events, inlineAllows, exceptions) {
   }
   for (const row of rows) {
     const full = row.url ?? row.snippet ?? row.reason ?? "(unknown)";
-    const badge = row.count > 1 ? `×${row.count}` : "";
+    const badge = row.count > 1 ? `\u00d7${row.count}` : "";
     let allowKind = null;
     let allowValue = null;
     if (row.action) {
@@ -719,10 +1048,6 @@ function renderDetail(view, events, inlineAllows, exceptions) {
         allowValue = row.action.value;
       }
     }
-    // Inline rows (script/handler) expose their raw body for preview; external
-    // script rows (first/third) offer a "View" that fetches the source.
-    // Removed containers preview their snippet (metadata only, never the raw
-    // body, matching the observer's trimmed record).
     const isInline = view === "inline-script" || view === "inline-handler";
     appendDetailRow(el, {
       cls: null,
@@ -742,7 +1067,6 @@ function renderDetail(view, events, inlineAllows, exceptions) {
   }
 }
 
-/** @param {string} url @returns {string | null} scheme://host[:port] */
 function originOf(url) {
   try {
     const u = new URL(url);
@@ -761,7 +1085,6 @@ let lastExceptions = [];
 
 const allEvents = () => [...lastEvents, ...lastNetEvents];
 
-/** @param {string} url @returns {boolean} true when the request origin runs a sensor/bot suite */
 function isBotDetectorOrigin(url) {
   try {
     return isBotDetectorHost(new URL(url).hostname);
@@ -770,21 +1093,19 @@ function isBotDetectorOrigin(url) {
   }
 }
 
-document.getElementById("inventory").addEventListener("click", (event) => {
+els.inventory.addEventListener("click", (event) => {
   const view = event.target?.dataset?.view;
   if (!view) return;
   currentView = currentView === view ? null : view;
   renderDetail(currentView, allEvents(), lastInlineAllows, lastExceptions);
 });
 
-document.getElementById("detail").addEventListener("click", async (event) => {
-  // View-source button: fetch + display an external script body.
+els.detail.addEventListener("click", async (event) => {
   const viewBtn = event.target.closest("button[data-view-source]");
   if (viewBtn) {
     await showSource(null, viewBtn.dataset.viewSource);
     return;
   }
-  // Allow buttons take precedence; row clicks expand/collapse.
   const btn = event.target.closest("button[data-kind]");
   if (btn) {
     if (!host) return;
@@ -795,8 +1116,13 @@ document.getElementById("detail").addEventListener("click", async (event) => {
         : kind === "container"
           ? { type: "add-container-allow", host, digest: value }
           : { type: "add-inline-allow", host, kind, hash: value };
-    const res = await chrome.runtime.sendMessage(message);
-    if (res?.error) return;
+    const res = await traceSend(message);
+    if (res?.error) {
+      showAllowNote(`Allow failed: ${res.error}`, false);
+      return;
+    }
+    // Allow was saved — prompt to reload.
+    showAllowNote(`${kind} allowed — reload to apply?`, true);
     await refreshUi();
     return;
   }
@@ -804,20 +1130,19 @@ document.getElementById("detail").addEventListener("click", async (event) => {
   if (li) li.classList.toggle("expanded");
 });
 
-document.getElementById("activity").addEventListener("click", (event) => {
+els.activity.addEventListener("click", (event) => {
   if (event.target.closest("button")) return;
   const li = event.target.closest("li");
   if (li) li.classList.toggle("expanded");
 });
 
 function renderActivity(events) {
-  const list = document.getElementById("activity");
-  list.replaceChildren();
+  els.activity.replaceChildren();
   if (!Array.isArray(events) || events.length === 0) {
     const li = document.createElement("li");
     li.className = "muted";
     li.textContent = "nothing recorded yet";
-    list.append(li);
+    els.activity.append(li);
     return;
   }
   const recent = events.slice(-8).reverse();
@@ -827,7 +1152,7 @@ function renderActivity(events) {
         ? e.reason ?? "violation"
         : e.kind === "script-element"
           ? `${KIND_LABELS[e.kind] ?? e.kind} (${e.category ?? "?"})${
-              e.action === "removed" ? " · removed" : ""
+              e.action === "removed" ? " \u2014 removed" : ""
             }: ${e.snippet ?? e.url ?? ""}`
           : `${KIND_LABELS[e.kind] ?? e.kind}${e.url ? `: ${e.url}` : ""}`;
     const li = document.createElement("li");
@@ -840,25 +1165,30 @@ function renderActivity(events) {
     line.className = "line";
     line.textContent = what;
     li.append(time, rawText, line);
-    list.append(li);
+    els.activity.append(li);
   }
 }
 
 async function loadActivity() {
   if (tabId === null) return;
-  const res = await chrome.runtime.sendMessage({
-    type: "get-activity",
-    tabId,
-  });
+  const res = await traceSend({ type: "get-activity", tabId });
   if (res?.error) return;
   lastEvents = res.events ?? [];
   lastNetEvents = res.netEvents ?? [];
+  lastStats = res.stats ?? null;
   requestAnimationFrame(() => {
     renderInventory(res.stats);
     renderActivity(lastEvents);
+    if (lastFlags) renderFlagControls(lastFlags, lastStats);
     renderDetail(currentView, allEvents(), lastInlineAllows, lastExceptions);
   });
 }
+
+// ---------------------------------------------------------------------------
+// boot
+// ---------------------------------------------------------------------------
+
+if (debugOn) enableDebug();
 
 const ctx = await activeTabContext();
 if (!ctx) {

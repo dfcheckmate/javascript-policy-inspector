@@ -8,11 +8,13 @@ import {
   MODES,
   PRESETS,
   REMOVAL_FLAG_BY_CATEGORY,
+  enforceInlineBase,
   isFlags,
   isPresetName,
   makeFlags,
   migrateLegacyModes,
   modeForFlags,
+  nearestPreset,
   presetFor,
 } from "../lib/flags.js";
 
@@ -156,4 +158,100 @@ test("REMOVAL_FLAG_BY_CATEGORY maps non-executable containers to real flags", ()
     false,
     "unknown containers are observation-only",
   );
+});
+
+test("nearestPreset returns the exact preset with an empty delta list", () => {
+  for (const [mode, bundle] of Object.entries(PRESETS)) {
+    const result = nearestPreset(bundle);
+    assert.deepEqual(result, { mode, deltas: [] });
+  }
+});
+
+test("nearestPreset picks observe when all flags default", () => {
+  const result = nearestPreset(makeFlags());
+  assert.deepEqual(result, { mode: MODES.OBSERVE, deltas: [] });
+});
+
+test("nearestPreset picks the nearest preset by Hamming distance (noScripts + report off)", () => {
+  const custom = makeFlags({
+    blockClassicScripts: true,
+    blockModuleScripts: true,
+    blockExternalScripts: true,
+    blockThirdPartyScripts: true,
+    blockInlineEventHandlers: true,
+    blockJavascriptUrls: true,
+    blockImportMaps: true,
+    blockSpeculationRules: true,
+    blockJsonLd: true,
+    blockJsonData: false,
+    reportBlockedContent: false, // ← noScripts has report on; toggle this off
+  });
+  const result = nearestPreset(custom);
+  assert.equal(result.mode, MODES.NO_SCRIPTS);
+  assert.equal(result.deltas.length, 1);
+  assert.equal(result.deltas[0].key, "reportBlockedContent");
+  assert.equal(result.deltas[0].on, false);
+});
+
+test("nearestPreset finds firstPartyOnly over noScripts when only blockJsonLd differs from firstPartyOnly", () => {
+  // firstPartyOnly preset: all 8 flags on, blockExternalScripts off, blockJsonLd on.
+  // This bundle is firstPartyOnly with blockJsonLd OFF — closer to firstPartyOnly
+  // (distance 1) than noScripts (distance 2, because noScripts also has
+  // blockExternalScripts on but our bundle has it off).
+  const custom = makeFlags({
+    blockClassicScripts: true,
+    blockModuleScripts: true,
+    blockExternalScripts: false,
+    blockThirdPartyScripts: true,
+    blockInlineEventHandlers: true,
+    blockJavascriptUrls: true,
+    blockImportMaps: true,
+    blockSpeculationRules: true,
+    blockJsonLd: false,     // ← differs from firstPartyOnly (true) and noScripts (true)
+  });
+  const result = nearestPreset(custom);
+  assert.equal(result.mode, MODES.FIRST_PARTY_ONLY);
+  assert.equal(result.deltas.length, 1);
+  assert.equal(result.deltas[0].key, "blockJsonLd");
+  assert.equal(result.deltas[0].on, false);
+});
+
+test("nearestPreset returns null on invalid input", () => {
+  assert.equal(nearestPreset(null), null);
+  assert.equal(nearestPreset(undefined), null);
+  assert.equal(nearestPreset("observe"), null);
+  assert.equal(nearestPreset({ blockClassicScripts: true }), null);
+});
+
+test("enforceInlineBase auto-enables the inline pair for enforced postures", () => {
+  const { flags, autoEnabled } = enforceInlineBase(
+    makeFlags({ blockExternalScripts: true }),
+  );
+  assert.equal(flags.blockExternalScripts, true);
+  assert.equal(flags.blockClassicScripts, true);
+  assert.equal(flags.blockModuleScripts, true);
+  assert.deepEqual(autoEnabled.sort(), ["blockClassicScripts", "blockModuleScripts"].sort());
+});
+
+test("enforceInlineBase leaves expressible bundles untouched", () => {
+  const f = makeFlags({ blockClassicScripts: true, blockModuleScripts: true });
+  const { flags, autoEnabled } = enforceInlineBase(f);
+  assert.deepEqual(flags, f);
+  assert.deepEqual(autoEnabled, []);
+});
+
+test("enforceInlineBase leaves observation-only / DOM bundles untouched", () => {
+  const f = makeFlags({ blockJsonLd: true, reportBlockedContent: true });
+  const { flags, autoEnabled } = enforceInlineBase(f);
+  assert.deepEqual(flags, f);
+  assert.deepEqual(autoEnabled, []);
+});
+
+test("enforceInlineBase fills a partial inline pair", () => {
+  const { flags, autoEnabled } = enforceInlineBase(
+    makeFlags({ blockModuleScripts: true, blockThirdPartyScripts: true }),
+  );
+  assert.equal(flags.blockClassicScripts, true);
+  assert.equal(flags.blockModuleScripts, true);
+  assert.deepEqual(autoEnabled, ["blockClassicScripts"]);
 });

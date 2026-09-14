@@ -18,6 +18,11 @@ import {
   ruleIdFor,
 } from "./lib/rules.js";
 import { normalizeHostForRule } from "./lib/host.js";
+import {
+  CONTAINER_DIGEST_RE,
+  ALLOWED_HASH_RE,
+  normalizeInlineHash,
+} from "./lib/allow.js";
 
 const SITE_POLICIES_KEY = "sitePolicies";
 const SITE_MODES_KEY = "siteModes"; // v1 store: read-only, migrated once
@@ -666,8 +671,6 @@ async function removeException(host, origin) {
   return all[key];
 }
 
-const ALLOWED_HASH_RE = /^sha256-[A-Za-z0-9+/]{40,}={0,2}$/;
-
 /**
  * Allows one inline script or handler by adding its CSP hash for a host.
  * @param {string} host
@@ -675,12 +678,9 @@ const ALLOWED_HASH_RE = /^sha256-[A-Za-z0-9+/]{40,}={0,2}$/;
  * @param {string} hash "sha256-…" (attr- prefix tolerated)
  */
 async function addInlineAllow(host, kind, hash) {
-  const clean = String(hash).replace(/^attr-/, "");
-  if (!ALLOWED_HASH_RE.test(clean)) {
-    // A truncated/absent hash token can never match a script; reject it
-    // up front so the popup shows a real error instead of a dead Allow.
-    throw new Error("invalid sha256 token (expected sha256- followed by 44 base64 chars)");
-  }
+  // A truncated/absent hash token can never match a script; reject it up
+  // front so the popup shows a real error instead of a dead Allow.
+  const clean = normalizeInlineHash(hash);
   const all = await getInlineAllows();
   const key = canon(host);
   const entry = all[key] ?? { scripts: [], attrs: [] };
@@ -691,8 +691,6 @@ async function addInlineAllow(host, kind, hash) {
   await syncRules();
   return entry;
 }
-
-const CONTAINER_DIGEST_RE = /^[0-9a-f]{64}$/;
 
 /**
  * Exempts one non-executing container from DOM removal on a host by adding
@@ -769,6 +767,92 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   await refreshBadge();
 });
 
+// ---------------------------------------------------------------------------
+// per-site reset (revert a broken/custom policy without touching other hosts)
+// ---------------------------------------------------------------------------
+
+/**
+ * Wipes every stored preference for one canonical host: flags bundle, legacy
+ * mode, exceptions, inline allowances, container allowlists, and any pause.
+ * After the wipe the host falls back to the observe default, so a policy that
+ * broke a site can never wedge it. Rules are reconciled once at the end.
+ * @param {string} host
+ */
+async function clearSite(host) {
+  const key = canon(host);
+  const [policies, legacyModes, exceptions, inlineAllows, containerAllows, paused] =
+    await Promise.all([
+      getSitePolicies(),
+      getStore(SITE_MODES_KEY),
+      getExceptions(),
+      getInlineAllows(),
+      getContainerAllows(),
+      getPaused(),
+    ]);
+  let changed = false;
+  for (const store of [
+    policies,
+    legacyModes,
+    exceptions,
+    inlineAllows,
+    containerAllows,
+    paused,
+  ]) {
+    if (key in store) {
+      delete store[key];
+      changed = true;
+    }
+  }
+  if (changed) {
+    await chrome.storage.local.set({
+      [SITE_POLICIES_KEY]: policies,
+      [SITE_MODES_KEY]: legacyModes,
+      [EXCEPTIONS_KEY]: exceptions,
+      [INLINE_ALLOWS_KEY]: inlineAllows,
+      [CONTAINER_ALLOWS_KEY]: containerAllows,
+      [PAUSED_KEY]: paused,
+    });
+  }
+  // A stale alarm would re-deploy the old bundle on expiry; kill it.
+  await chrome.alarms.clear(`resume:${key}`);
+  await syncRules();
+  return { ok: true };
+}
+
+/** Flushes one tab's transient ledger (events/stats/network) and override. */
+async function clearTab(tabId) {
+  await chrome.storage.session.remove([
+    eventsKey(tabId),
+    statsKey(tabId),
+    netKey(tabId),
+  ]);
+  netPending.delete(tabId);
+  const timer = netTimers.get(tabId);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    netTimers.delete(tabId);
+  }
+  await clearTabOverride(tabId);
+  await refreshBadge();
+  return { ok: true };
+}
+
+/**
+ * Fire-and-forget broadcast so an open popup can re-hydrate when policy,
+ * pause or override state changes from outside its own action flow (alarm
+ * auto-resume, another context, import). No payload — the popup re-fetches
+ * get-state, keeping the contract single-source-of-truth.
+ */
+function notifyStateChanged() {
+  try {
+    void Promise.resolve(
+      chrome.runtime.sendMessage({ type: "state-changed" }),
+    ).catch(() => {});
+  } catch {
+    // no listeners (e.g. tests, popup closed) — nothing to notify
+  }
+}
+
 /**
  * Message hub for the popup and observer content scripts.
  * - {type:"get-state", host, tabId?}   -> {flags, mode, activeCsp, pausedUntil, tabOverride, exceptions, inlineAllows}
@@ -785,6 +869,9 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
  * - {type:"import-settings", data}     -> {ok:true} (accepts v1 siteModes + v2 sitePolicies)
  * - {type:"add-container-allow", host, digest}    -> {containerAllows}
  * - {type:"remove-container-allow", host, digest} -> {containerAllows}
+ * - {type:"clear-site", host} -> {ok:true} (revert host to observe default)
+ * - {type:"clear-tab", tabId} -> {ok:true} (flush the tab's transient ledger)
+ * - broadcast {type:"state-changed"} — fire-and-forget; popup re-hydrates
  */
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
@@ -836,6 +923,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const flags = presetFor(msg.mode);
         if (!flags) throw new Error(`unknown preset mode: ${String(msg.mode)}`);
         await setSitePolicy(msg.host, flags);
+        notifyStateChanged();
         sendResponse({ ok: true });
         break;
       }
@@ -844,6 +932,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           throw new Error("set-policy needs a full flags bundle");
         }
         await setSitePolicy(msg.host, makeFlags(msg.flags));
+        notifyStateChanged();
         sendResponse({ ok: true });
         break;
       }
@@ -879,10 +968,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           MAX_PAUSE_MS,
         );
         sendResponse(await pauseHost(msg.host, ms));
+        notifyStateChanged();
         break;
       }
       case "resume-host":
         await resumeHost(msg.host);
+        notifyStateChanged();
         sendResponse({ ok: true });
         break;
       case "toggle-tab-override": {
@@ -891,6 +982,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
         sendResponse({ active: await toggleTabOverride(msg.tabId) });
+        notifyStateChanged();
         break;
       }
       case "add-exception":
@@ -915,6 +1007,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({
           containerAllows: await removeContainerAllow(msg.host, msg.digest),
         });
+        break;
+      case "clear-site":
+        sendResponse(await clearSite(msg.host));
+        notifyStateChanged();
+        break;
+      case "clear-tab":
+        if (typeof msg.tabId !== "number") {
+          sendResponse({ error: "clear-tab needs tabId" });
+          break;
+        }
+        sendResponse(await clearTab(msg.tabId));
         break;
       case "export-settings": {
         const [sitePolicies, siteExceptions, siteInlineAllows, siteContainerAllows] =

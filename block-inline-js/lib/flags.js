@@ -88,6 +88,36 @@ export function isFlags(value) {
 }
 
 /**
+ * Returns an expressible bundle for `flags`, auto-enabling the inline flag
+ * pair (classic + module scripts) when an enforced posture demands it.
+ *
+ * Any enforced posture roots `script-src` at 'none'/'self'/'*' and never
+ * emits 'unsafe-inline' (INLINE INVARIANT), so running scripts inline while
+ * external sources are refused is unexpressible. Rather than rejecting single
+ * toggles like "Block external scripts" alone, the popup completes the bundle
+ * and reports what it enabled. Pure DOM/report bundles (no CSP posture) are
+ * returned untouched.
+ * @param {object} flags
+ * @returns {{flags: {[K in keyof typeof DEFAULT_FLAGS]: boolean}, autoEnabled: string[]}}
+ */
+export function enforceInlineBase(flags) {
+  const wantsCsp =
+    flags.blockExternalScripts ||
+    flags.blockThirdPartyScripts ||
+    flags.blockClassicScripts ||
+    flags.blockModuleScripts ||
+    flags.blockInlineEventHandlers ||
+    flags.blockJavascriptUrls;
+  const autoEnabled = [];
+  if (wantsCsp && (!flags.blockClassicScripts || !flags.blockModuleScripts)) {
+    if (!flags.blockClassicScripts) autoEnabled.push("blockClassicScripts");
+    if (!flags.blockModuleScripts) autoEnabled.push("blockModuleScripts");
+    flags = { ...flags, blockClassicScripts: true, blockModuleScripts: true };
+  }
+  return { flags, autoEnabled };
+}
+
+/**
  * Built-in policy presets. A preset is a named, immutable flag bundle; the
  * popup radios map directly onto these.
  *
@@ -160,12 +190,41 @@ export function modeForFlags(flags) {
 }
 
 /**
- * One-way migration from the v1 mode store to the v2 flag store. Every host
- * that still has a legacy mode (and no v2 bundle yet) is materialized as its
- * preset bundle — except `observe`, which is equivalent to "no policy stored"
- * and is therefore not written. Hosts already carrying v2 policies are left
- * untouched, so re-running is idempotent.
+ * Nearest preset for a custom bundle, plus the deltas that set it apart.
  *
+ * Exact bundles resolve to their own preset with an empty delta list. Custom
+ * bundles resolve to the preset with the fewest differing flags (Hamming
+ * distance over FLAG_KEYS), ties broken by preset declaration order. A delta
+ * `on: true` means the custom profile turns the flag ON relative to the
+ * preset; `on: false` means it turns it OFF. Drives the popup's condensed
+ * mode readout ("No scripts  (+report)"), never policy.
+ * @param {unknown} flags
+ * @returns {{mode: keyof typeof MODES, deltas: Array<{key: string, on: boolean}>} | null}
+ */
+export function nearestPreset(flags) {
+  if (!isFlags(flags)) return null;
+  for (const [mode, bundle] of Object.entries(PRESETS)) {
+    if (FLAG_KEYS.every((k) => flags[k] === bundle[k])) return { mode, deltas: [] };
+  }
+  let best = null;
+  let bestDist = Infinity;
+  for (const [mode, bundle] of Object.entries(PRESETS)) {
+    let dist = 0;
+    for (const k of FLAG_KEYS) if (flags[k] !== bundle[k]) dist++;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = mode;
+    }
+  }
+  const bundle = PRESETS[best];
+  const deltas = FLAG_KEYS.filter((k) => flags[k] !== bundle[k]).map((key) => ({
+    key,
+    on: flags[key],
+  }));
+  return { mode: best, deltas };
+}
+
+/**
  * Caller is responsible for canonical keys (the storage layer already keeps
  * eTLD+1-normalized keys).
  * @param {unknown} policies existing v2 store object (plain map)

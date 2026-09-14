@@ -9,28 +9,23 @@
   <h1>JavaScript Policy Inspector</h1>
   <p id="origin" class="origin">…</p>
 
-  <fieldset id="modes">
+  <fieldset id="policy">
     <legend>Policy for this site</legend>
-    <label><input type="radio" name="mode" value="observe" /> Observe</label>
-    <label><input type="radio" name="mode" value="firstPartyOnly" /> First-party only</label>
-    <label><input type="radio" name="mode" value="noScripts" /> No scripts</label>
+    <p id="mode-label" class="mode-label">…</p>
+    <p id="mode-detail" class="mode-detail"></p>
+    <p id="summary" class="summary"></p>
+    <p id="rule" class="rule"></p>
   </fieldset>
 
-  <p id="persist-note" class="hint">
-    These choices persist across visits. <b>Allow this tab</b> is temporary for
-    the current tab only.
-  </p>
-  <p id="profile-badge" class="hint"></p>
-  <p id="bot-warning" class="hint warn" hidden></p>
-
-  <details id="advanced">
-    <summary>Advanced: per-category flags</summary>
+  <details id="flags" open>
+    <summary>Flags</summary>
+    <p id="flag-front-matter" class="hint">
+      11 granular flags are the source of truth. The mode label above is a
+      preset name for the combination they form.
+    </p>
     <div id="flag-controls"></div>
     <p id="removal-hint" class="hint"></p>
   </details>
-
-  <p id="summary" class="summary"></p>
-  <p id="rule" class="rule"></p>
 
   <div class="actions">
     <button id="reload" type="button">Reload with policy</button>
@@ -47,6 +42,24 @@
     <button id="pause" type="button">Resume</button>
   </div>
   <p id="pause-state" class="rule"></p>
+
+  <p id="persist-note" class="hint">
+    Choices persist across visits. <b>Allow this tab</b> is temporary for the
+    current tab only.
+  </p>
+  <p id="bot-warning" class="hint warn" hidden></p>
+  <p id="profile-badge" class="hint"></p>
+
+  <div class="actions">
+    <button id="reset-site" type="button">Reset this site</button>
+    <button id="reset-tab" type="button">Clear this tab</button>
+  </div>
+
+  <p id="allow-note" class="allow-note" hidden>
+    <span id="allow-note-text"></span>
+    <button id="allow-note-reload" type="button">Reload</button>
+    <button id="allow-note-dismiss" type="button">OK</button>
+  </p>
 
   <details id="source-view" hidden>
     <summary>Script source</summary>
@@ -67,14 +80,19 @@
   <ul id="detail" class="detail"></ul>
 
   <h2>Activity</h2>
-  <ul id="activity" class="activity"><li class="muted">loading…</li></ul>
   <p id="activity-note" class="hint">Blocked entries come from live CSP violations; reload after changing policy.</p>
+  <ul id="activity" class="activity"><li class="muted">loading…</li></ul>
 
   <div class="io">
     <button id="export-btn" type="button">Export settings</button>
     <button id="import-btn" type="button">Import settings</button>
     <input id="import-file" type="file" accept=".json,application/json" hidden />
   </div>
+
+  <p id="debug-bar" hidden>
+    <span>Diagnostics on. Event trace + last state are captured.</span>
+    <button id="debug-copy" type="button">Copy diagnostics</button>
+  </p>
 
   <script type="module" src="popup.js"></script>
 </body>
