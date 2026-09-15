@@ -1,4 +1,5 @@
 import {
+  composeExecutionPlanFromFlags,
   composePolicyFromFlags,
   normalizeOrigin,
 } from "./lib/policies.js";
@@ -893,8 +894,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           attrHashes: inlineAllows[key]?.attrs ?? [],
         };
         let activeCsp = null;
+        let domFilters = null;
+        let autoEnabled = [];
         try {
-          activeCsp = composePolicyFromFlags(flags, allows);
+          const plan = composeExecutionPlanFromFlags(flags, allows);
+          activeCsp = plan.csp;
+          domFilters = plan.domFilters;
+          autoEnabled = plan.autoEnabled;
         } catch {
           // unexpressible stored bundle — surfaced in the popup as a profile
           // error rather than crashing the state fetch
@@ -913,6 +919,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           inlineAllows: { scripts: allows.scriptHashes, attrs: allows.attrHashes },
           containerAllows: containerAllows[key] ?? [],
           activeCsp,
+          domFilters,
+          autoEnabled,
         };
         state.tabOverride =
           typeof msg.tabId === "number" && (await isTabOverridden(msg.tabId));

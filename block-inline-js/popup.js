@@ -315,11 +315,21 @@ async function activeTabContext() {
   return { host: normalizeHostForRule(url.hostname), tabId: tab.id };
 }
 
-/** Shows the CSP the extension would enforce, per the service worker's activeCsp. */
-function renderRuleStatus(activeCsp) {
-  els.rule.textContent = activeCsp
-    ? `CSP rule: ACTIVE \u2192 ${activeCsp}`
-    : "CSP rule: none (Observe or not applied)";
+/** Shows the CSP + DOM-filter arms the extension enforces. */
+function renderRuleStatus({ csp, domFilters, autoEnabled } = {}) {
+  const parts = [];
+  parts.push(
+    csp
+      ? `CSP rule: ACTIVE \u2192 ${csp}`
+      : "CSP rule: none (Observe or not applied)",
+  );
+  if (domFilters && domFilters.length > 0) {
+    parts.push(`DOM strip: ${domFilters.join(", ")}`);
+  }
+  if (autoEnabled && autoEnabled.length > 0) {
+    parts.push(`auto-enabled: ${autoEnabled.join(", ")}`);
+  }
+  els.rule.textContent = parts.join(" | ");
 }
 
 function fmtClock(ts) {
@@ -509,7 +519,7 @@ async function refreshUi() {
   lastExceptions = exceptions;
   lastContainerAllows = containerAllows;
   renderModeReadout(state.flags);
-  renderRuleStatus(state.activeCsp);
+  renderRuleStatus({ csp: state.activeCsp, domFilters: state.domFilters, autoEnabled: state.autoEnabled });
   renderFlagControls(state.flags, lastStats);
   updateRemovalHint(state.flags);
   updateBotWarning(state.flags);

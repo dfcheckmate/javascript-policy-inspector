@@ -9,6 +9,7 @@ import {
   PRESETS,
   REMOVAL_FLAG_BY_CATEGORY,
   enforceInlineBase,
+  enforceDomBase,
   isFlags,
   isPresetName,
   makeFlags,
@@ -254,4 +255,52 @@ test("enforceInlineBase fills a partial inline pair", () => {
   assert.equal(flags.blockClassicScripts, true);
   assert.equal(flags.blockModuleScripts, true);
   assert.deepEqual(autoEnabled, ["blockClassicScripts"]);
+});
+
+test("enforceDomBase auto-enables classic+module for module-tied removals", () => {
+  const f = makeFlags({ blockImportMaps: true });
+  const { flags, autoEnabled } = enforceDomBase(f);
+  assert.equal(flags.blockClassicScripts, true);
+  assert.equal(flags.blockModuleScripts, true);
+  assert.deepEqual(autoEnabled, ["blockClassicScripts", "blockModuleScripts"]);
+});
+
+test("enforceDomBase auto-enables for speculation rules (module-tied)", () => {
+  const f = makeFlags({ blockSpeculationRules: true });
+  const { flags, autoEnabled } = enforceDomBase(f);
+  assert.equal(flags.blockClassicScripts, true);
+  assert.equal(flags.blockModuleScripts, true);
+  assert.deepEqual(autoEnabled, ["blockClassicScripts", "blockModuleScripts"]);
+});
+
+test("enforceDomBase does NOT auto-enable for pure data cleanup (json-ld)", () => {
+  const f = makeFlags({ blockJsonLd: true });
+  const { flags, autoEnabled } = enforceDomBase(f);
+  assert.equal(flags.blockClassicScripts, false);
+  assert.equal(flags.blockModuleScripts, false);
+  assert.deepEqual(autoEnabled, []);
+  assert.deepEqual(flags, f);
+});
+
+test("enforceDomBase does NOT auto-enable for pure data cleanup (json-data)", () => {
+  const f = makeFlags({ blockJsonData: true });
+  const { flags, autoEnabled } = enforceDomBase(f);
+  assert.equal(flags.blockClassicScripts, false);
+  assert.equal(flags.blockModuleScripts, false);
+  assert.deepEqual(autoEnabled, []);
+});
+
+test("enforceDomBase skips enrichment when module scripts already enabled", () => {
+  const f = makeFlags({ blockImportMaps: true, blockClassicScripts: true, blockModuleScripts: true });
+  const { flags, autoEnabled } = enforceDomBase(f);
+  assert.deepEqual(autoEnabled, []);
+  assert.equal(flags.blockClassicScripts, true);
+  assert.equal(flags.blockModuleScripts, true);
+});
+
+test("enforceDomBase does nothing on observation-only bundle", () => {
+  const f = makeFlags();
+  const { flags, autoEnabled } = enforceDomBase(f);
+  assert.deepEqual(autoEnabled, []);
+  assert.deepEqual(flags, f);
 });

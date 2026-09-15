@@ -118,6 +118,37 @@ export function enforceInlineBase(flags) {
 }
 
 /**
+- This rule applies no matter what kind of host is being used, including a simple DOM/container bundle with no CSP settings.
+
+- Before blocking a declarative feature whose risk depends on module scripts, the system must first be able to represent that module-script setup.
+
+- If import maps—or related features such as speculation rules—are removed while module scripts are disabled, the system automatically enables both classic and module inline scripts. This prevents a Tier-3 warning from being left without a valid configuration.
+
+-  Removing an import map without enabling its required module-script support creates a “dangling” risk. Instead of rejecting the configuration, the engine adds the missing support before producing the output.
+
+- Pure data cleanup, such as removing JSON-LD or other JSON data, does not require a module-script setup. It may require classic and module scripts to remain disabled, but the cleanup itself can still be represented.
+
+
+ * @param {object} flags
+ * @returns {{flags: {[K in keyof typeof DEFAULT_FLAGS]: boolean}, autoEnabled: string[]}}
+ */
+export function enforceDomBase(flags) {
+  const wantsModuleBase =
+    flags.blockImportMaps ||
+    flags.blockSpeculationRules;
+  // Pure data cleanup (json-ld / json-data) is served by the DOM sanitizer arm
+  // alone: removing those containers needs no module-script setup, so we never
+  // auto-enable the classic+module pair for them.
+  const autoEnabled = [];
+  if (wantsModuleBase && (!flags.blockClassicScripts || !flags.blockModuleScripts)) {
+    if (!flags.blockClassicScripts) autoEnabled.push("blockClassicScripts");
+    if (!flags.blockModuleScripts) autoEnabled.push("blockModuleScripts");
+    flags = { ...flags, blockClassicScripts: true, blockModuleScripts: true };
+  }
+  return { flags, autoEnabled };
+}
+
+/**
  * Built-in policy presets. A preset is a named, immutable flag bundle; the
  * popup radios map directly onto these.
  *

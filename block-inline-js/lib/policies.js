@@ -20,7 +20,7 @@
  *   'unsafe-inline') handlers are still blocked — a conservative failure.
  */
 
-import { MODES, PRESETS } from "./flags.js";
+import { MODES, PRESETS, REMOVAL_FLAG_BY_CATEGORY, enforceDomBase } from "./flags.js";
 
 // Modes now live in lib/flags.js (the flag bundle is the source of truth);
 // re-exporting keeps existing importers working.
@@ -120,6 +120,50 @@ export function composePolicyFromFlags(flags, allows = {}) {
   const attrDirective =
     attrHashes.length > 0 ? `script-src-attr ${attrHashes.join(" ")}` : "script-src-attr 'none'";
   return `script-src ${scriptSrc}; ${attrDirective}; object-src 'none'; base-uri 'none'`;
+}
+
+/**
+ * Composes the DOM-sanitizer arm from the four Tier-3 flags — the removal
+ * surface a CSP string cannot reach (import maps, speculation rules, JSON-LD,
+ * and embedded JSON data are all declarative elements, not network requests).
+ *
+ * Tier-1/2 flags never add DOM filters: the CSP arm owns classic/module
+ * script posture and inline-event/Javascript-URL enforcement, so a bundle
+ * whose only request is script posture must not imply DOM cleanup.
+ *
+ * @param {object} flags the flag bundle
+ * @returns {string[] | null} category list of elements to strip, or null when
+ *   the bundle needs no DOM sanitization (keeps popup readout truthful — a
+ *   Tier-3-only bundle gets a real DOM arm instead of a silent null CSP)
+ */
+export function composeDomFiltersFromFlags(flags) {
+  const categories = [];
+  for (const [category, flagKey] of Object.entries(REMOVAL_FLAG_BY_CATEGORY)) {
+    if (flags[flagKey]) categories.push(category);
+  }
+  return categories.length > 0 ? categories : null;
+}
+
+/**
+ * Resolves the full execution plan for a flag bundle — the middleware surface
+ * the service worker and popup consume. Returns BOTH arms the flag body can
+ * express, enriched bottom-up by enforceDomBase, so no Tier-3 toggle can be a
+ * silently dead flag:
+ *
+ *   - `csp`         the CSP string (or null) for Tier-1/2 posture
+ *   - `domFilters`  element categories to strip (or null) for Tier-3 cleanup
+ *   - `autoEnabled` flags that enforceDomBase had to enable to make the
+ *                   requested removal expressible (depends on module scripts)
+ *
+ * @param {object} flags the flag bundle
+ * @param {{origins?: string[], scriptHashes?: string[], attrHashes?: string[]}} [allows]
+ * @returns {{csp: string | null, domFilters: string[] | null, autoEnabled: string[]}}
+ */
+export function composeExecutionPlanFromFlags(flags, allows = {}) {
+  const { flags: enriched, autoEnabled } = enforceDomBase(flags);
+  const csp = composePolicyFromFlags(enriched, allows);
+  const domFilters = composeDomFiltersFromFlags(enriched);
+  return { csp, domFilters, autoEnabled };
 }
 
 /**

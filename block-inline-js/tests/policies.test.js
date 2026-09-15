@@ -7,6 +7,8 @@ import {
   MODES,
   POLICY_SUMMARY,
   composeHeader,
+  composeExecutionPlanFromFlags,
+  composeDomFiltersFromFlags,
   composePolicy,
   composePolicyFromFlags,
   isMode,
@@ -323,4 +325,74 @@ test("composePolicy ≡ composePolicyFromFlags(preset) for equal allowances", ()
       mode,
     );
   }
+});
+
+test("composeDomFiltersFromFlags returns null for observation bundle", () => {
+  assert.equal(composeDomFiltersFromFlags(makeFlags()), null);
+});
+
+test("composeDomFiltersFromFlags returns null for Tier-1/2 only bundle", () => {
+  const f = makeFlags({ blockExternalScripts: true, blockThirdPartyScripts: true });
+  assert.equal(composeDomFiltersFromFlags(f), null);
+});
+
+test("composeDomFiltersFromFlags emits import-map for blockImportMaps", () => {
+  const f = makeFlags({ blockImportMaps: true });
+  assert.deepEqual(composeDomFiltersFromFlags(f), ["import-map"]);
+});
+
+test("composeDomFiltersFromFlags emits speculation-rules for blockSpeculationRules", () => {
+  const f = makeFlags({ blockSpeculationRules: true });
+  assert.deepEqual(composeDomFiltersFromFlags(f), ["speculation-rules"]);
+});
+
+test("composeDomFiltersFromFlags emits json-ld and json-data for both", () => {
+  const f = makeFlags({ blockJsonLd: true, blockJsonData: true });
+  assert.deepEqual(composeDomFiltersFromFlags(f), ["json-ld", "json-data"]);
+});
+
+test("composeDomFiltersFromFlags emits all four Tier-3 categories", () => {
+  const f = makeFlags({ blockImportMaps: true, blockSpeculationRules: true, blockJsonLd: true, blockJsonData: true });
+  const result = composeDomFiltersFromFlags(f);
+  assert.deepEqual(result.sort(), ["import-map", "json-data", "json-ld", "speculation-rules"].sort());
+});
+
+test("composeExecutionPlanFromFlags returns dual-arm plan with both arms", () => {
+  const base = makeFlags({ blockClassicScripts: true, blockModuleScripts: true, blockJsonLd: true });
+  const plan = composeExecutionPlanFromFlags(base);
+  assert.equal(typeof plan.csp, "string");
+  assert.ok(plan.csp.includes("script-src"));
+  assert.deepEqual(plan.domFilters, ["json-ld"]);
+  assert.deepEqual(plan.autoEnabled, []);
+});
+
+test("composeExecutionPlanFromFlags: Tier-3-only bundle has null CSP + non-null domFilters", () => {
+  const f = makeFlags({ blockJsonLd: true, blockJsonData: true });
+  const plan = composeExecutionPlanFromFlags(f);
+  assert.equal(plan.csp, null);
+  assert.deepEqual(plan.domFilters, ["json-ld", "json-data"]);
+  assert.deepEqual(plan.autoEnabled, []);
+});
+
+test("composeExecutionPlanFromFlags: import-maps auto-enables module base + emits domFilters", () => {
+  const f = makeFlags({ blockImportMaps: true });
+  const plan = composeExecutionPlanFromFlags(f);
+  assert.equal(typeof plan.csp, "string");
+  assert.ok(plan.csp.includes("script-src"));
+  assert.deepEqual(plan.domFilters, ["import-map"]);
+  assert.deepEqual(plan.autoEnabled.sort(), ["blockClassicScripts", "blockModuleScripts"]);
+});
+
+test("composeExecutionPlanFromFlags: mixed bundle has both arms", () => {
+  const f = makeFlags({ blockExternalScripts: true, blockImportMaps: true, blockJsonLd: true });
+  const plan = composeExecutionPlanFromFlags(f);
+  assert.equal(typeof plan.csp, "string");
+  assert.deepEqual(plan.domFilters.sort(), ["import-map", "json-ld"]);
+});
+
+test("composeExecutionPlanFromFlags: observation bundle is all-null/empty", () => {
+  const plan = composeExecutionPlanFromFlags(makeFlags());
+  assert.equal(plan.csp, null);
+  assert.equal(plan.domFilters, null);
+  assert.deepEqual(plan.autoEnabled, []);
 });
