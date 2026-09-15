@@ -27,6 +27,7 @@ export const MODES = Object.freeze({
 });
 
 /** Canonical flag names, in UI order. */
+/** @type {readonly (keyof typeof DEFAULT_FLAGS)[]} */
 export const FLAG_KEYS = Object.freeze([
   "blockClassicScripts",
   "blockModuleScripts",
