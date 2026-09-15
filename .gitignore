@@ -31,6 +31,10 @@ service-worker.bundled.js
 # Store listing copy — maintained out-of-repo, not part of the codebase
 AMO-listing.md
 
-# IDE
+# IDE and notes
 *.vscode
+misc
 
+
+
+jsconfig.json
