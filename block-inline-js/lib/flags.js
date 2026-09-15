@@ -213,7 +213,7 @@ export function presetFor(name) {
 export function modeForFlags(flags) {
   if (!isFlags(flags)) return null;
   for (const [mode, bundle] of Object.entries(PRESETS)) {
-    if (FLAG_KEYS.every((k) => flags[k] === bundle[k])) return mode;
+    if (FLAG_KEYS.every((k) => flags[k] === bundle[k])) return /** @type {keyof typeof MODES} */ (mode);
   }
   return null;
 }
