@@ -97,7 +97,7 @@ export function isFlags(value) {
  * toggles like "Block external scripts" alone, the popup completes the bundle
  * and reports what it enabled. Pure DOM/report bundles (no CSP posture) are
  * returned untouched.
- * @param {object} flags
+ * @param {{[K in keyof typeof DEFAULT_FLAGS]: boolean}} flags
  * @returns {{flags: {[K in keyof typeof DEFAULT_FLAGS]: boolean}, autoEnabled: string[]}}
  */
 export function enforceInlineBase(flags) {
@@ -118,18 +118,13 @@ export function enforceInlineBase(flags) {
 }
 
 /**
-- This rule applies no matter what kind of host is being used, including a simple DOM/container bundle with no CSP settings.
-
-- Before blocking a declarative feature whose risk depends on module scripts, the system must first be able to represent that module-script setup.
-
-- If import maps—or related features such as speculation rules—are removed while module scripts are disabled, the system automatically enables both classic and module inline scripts. This prevents a Tier-3 warning from being left without a valid configuration.
-
--  Removing an import map without enabling its required module-script support creates a “dangling” risk. Instead of rejecting the configuration, the engine adds the missing support before producing the output.
-
-- Pure data cleanup, such as removing JSON-LD or other JSON data, does not require a module-script setup. It may require classic and module scripts to remain disabled, but the cleanup itself can still be represented.
-
-
- * @param {object} flags
+ * Bottom-up enrichment for Tier-3 DOM removals: when a module-tied feature
+ * (import maps, speculation rules) is removed while module scripts are
+ * disabled, auto-enable both classic and module inline scripts so the
+ * configuration is expressible. Pure data cleanup (JSON-LD, JSON data) is
+ * served by the DOM arm alone and never forces the module-script base.
+ *
+ * @param {{[K in keyof typeof DEFAULT_FLAGS]: boolean}} flags
  * @returns {{flags: {[K in keyof typeof DEFAULT_FLAGS]: boolean}, autoEnabled: string[]}}
  */
 export function enforceDomBase(flags) {
