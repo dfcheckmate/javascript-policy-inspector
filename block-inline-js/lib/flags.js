@@ -19,6 +19,7 @@
  * expressed in CSP (see composePolicyFromFlags).
  */
 
+/** @type {{readonly OBSERVE: "observe"; readonly FIRST_PARTY_ONLY: "firstPartyOnly"; readonly NO_SCRIPTS: "noScripts"}} */
 export const MODES = Object.freeze({
   OBSERVE: "observe",
   FIRST_PARTY_ONLY: "firstPartyOnly",
