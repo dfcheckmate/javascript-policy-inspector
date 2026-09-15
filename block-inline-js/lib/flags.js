@@ -73,6 +73,7 @@ export const REMOVAL_FLAG_BY_CATEGORY = Object.freeze({
  * @returns {{[K in keyof typeof DEFAULT_FLAGS]: boolean}}
  */
 export function makeFlags(overrides = {}) {
+  /** @type {{[K in keyof typeof DEFAULT_FLAGS]: boolean}} */
   const flags = { ...DEFAULT_FLAGS };
   for (const [key, value] of Object.entries(overrides)) {
     if (!FLAG_KEYS.includes(key)) throw new Error(`unknown flag: ${key}`);
