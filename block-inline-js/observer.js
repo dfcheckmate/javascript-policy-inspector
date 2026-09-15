@@ -25,9 +25,168 @@
  * the default profile (DEFAULT_POLICY = observe) removes nothing.
  */
 
-import { getScriptCategory, isExecutable, isInlineHandlerName, isJavaScriptUrl, CATEGORIES } from "./lib/classify.js";
-import { normalizeHostForRule } from "./lib/host.js";
-import { DEFAULT_POLICY, isFlags, migrateLegacyModes, REMOVAL_FLAG_BY_CATEGORY } from "./lib/flags.js";
+
+/* ════════════════════════════════════════════════════════════════════
+ * ══ vendored from lib/classify.js (source of truth — DO NOT EDIT THIS BLOCK;
+ * ══ edit lib/classify.js and re-run scripts/vendor-observer.mjs) ══
+ * ════════════════════════════════════════════════════════════════════ */
+/**
+ * Classifies a <script> element from its src/type attributes.
+ * @param {{ src?: string | null, type?: string | null }} [descriptor]
+ * @returns {string} one of CATEGORIES
+ */
+function getScriptCategory({ src = null, type = null } = {}) {
+  const hasSrc = typeof src === "string" && src.trim() !== "";
+  const t = normalizeType(type);
+
+  if (hasSrc) {
+    // With a src, the element can still be a *fetched* container: import maps
+    // and speculation rules may carry a src (JSON-LD/JSON-data never do).
+    if (isJavaScriptType(t)) return CATEGORIES.EXTERNAL_JAVASCRIPT;
+    switch (t) {
+      case "importmap":
+        return CATEGORIES.IMPORT_MAP;
+      case "speculationrules":
+        return CATEGORIES.SPECULATION_RULES;
+      default:
+        return CATEGORIES.UNKNOWN_SCRIPT_CONTAINER;
+    }
+  }
+
+  if (isJavaScriptType(t)) return CATEGORIES.INLINE_JAVASCRIPT;
+
+  switch (t) {
+    case "application/ld+json":
+      return CATEGORIES.JSON_LD;
+    case "application/json":
+      return CATEGORIES.JSON_DATA;
+    case "importmap":
+      return CATEGORIES.IMPORT_MAP;
+    case "speculationrules":
+      return CATEGORIES.SPECULATION_RULES;
+    default:
+      return CATEGORIES.UNKNOWN_SCRIPT_CONTAINER;
+  }
+}
+
+/** @param {string | undefined} category @returns {boolean} true when executable */
+function isExecutable(category) {
+  return EXECUTABLE_TYPES.includes(category);
+}
+
+/**
+ * True for event-handler content attribute names (onclick, onload, …).
+ * Browsers recognize lowercase `on<event>` names only, so "onClick"/"on1"
+ * are not treated as handlers. Lexical approximation: only the *registered*
+ * event names fire in browsers, but the registry is large and version-
+ * dependent, so names like "once" are matched here rather than excluded.
+ * @param {string | null | undefined} name
+ * @returns {boolean}
+ */
+function isInlineHandlerName(name) {
+  return typeof name === "string" && /^on[a-z]+$/.test(name);
+}
+
+/**
+ * True for `javascript:` URL strings. Whitespace between scheme and colon is
+ * accepted, per the URL parser (e.g. "javascript\n:alert(1)").
+ * @param {string | null | undefined} value
+ * @returns {boolean}
+ */
+function isJavaScriptUrl(value) {
+  return typeof value === "string" && /^\s*javascript\s*:/i.test(value);
+}
+
+const CATEGORIES = Object.freeze({
+  JSON_LD: "json-ld",
+  JSON_DATA: "json-data",
+  IMPORT_MAP: "import-map",
+  SPECULATION_RULES: "speculation-rules",
+  INLINE_JAVASCRIPT: "inline-javascript",
+  EXTERNAL_JAVASCRIPT: "external-javascript",
+  JAVASCRIPT_URL: "javascript-url",
+  UNKNOWN_SCRIPT_CONTAINER: "unknown-script-container",
+});
+
+/* ════════════════════════════════════════════════════════════════════
+ * ══ vendored from lib/host.js (source of truth — DO NOT EDIT THIS BLOCK;
+ * ══ edit lib/host.js and re-run scripts/vendor-observer.mjs) ══
+ * ════════════════════════════════════════════════════════════════════ */
+/**
+ * Reduces any hostname to its registrable (eTLD+1) form.
+ *
+ * This matters for DNR `requestDomains`: `["example.com"]` matches the apex
+ * AND every subdomain, but `["www.example.com"]` matches only www + its
+ * subdomains — MISSING the apex. Folding to the apex here means every
+ * subdomain of a site collapses to one rule, so entering `www.example.com`
+ * or `api.example.com` both govern the whole site instead of half-overlapping.
+ *
+ * @param {string|unknown} host e.g. "www.example.com" → "example.com"
+ * @returns {string} normalized host; "" for empty input
+ */
+function normalizeHostForRule(host) {
+  const h = String(host ?? "").trim().toLowerCase().replace(/\.$/, "");
+  if (!h) return "";
+  const isIpv4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(h);
+  const isHostLike = /^[a-z0-9.-]+$/.test(h);
+  // IPs, IPv6 (has ':'), and single labels can't be folded further.
+  if (isIpv4 || !isHostLike || !h.includes(".")) return h;
+  const labels = h.split(".");
+  if (labels.length <= 2) return h;
+  const lastTwo = labels.slice(-2).join(".");
+  if (MULTI_LABEL_SUFFIXES.has(lastTwo)) return labels.slice(-3).join(".");
+  return lastTwo;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * ══ vendored from lib/flags.js (source of truth — DO NOT EDIT THIS BLOCK;
+ * ══ edit lib/flags.js and re-run scripts/vendor-observer.mjs) ══
+ * ════════════════════════════════════════════════════════════════════ */
+/**
+ * Default policy for hosts with no stored preference — observe. Chosen for
+ * bot-classification safety: a stable, sensor-loading posture is the profile
+ * least likely to be flagged as automation; hardening is per-host opt-in.
+ */
+const DEFAULT_POLICY = PRESETS[MODES.OBSERVE];
+
+/** @param {unknown} value @returns {value is {[K in keyof typeof DEFAULT_FLAGS]: boolean}} */
+function isFlags(value) {
+  if (!value || typeof value !== "object") return false;
+  return FLAG_KEYS.every((k) => typeof value[k] === "boolean");
+}
+
+/**
+ * Caller is responsible for canonical keys (the storage layer already keeps
+ * eTLD+1-normalized keys).
+ * @param {unknown} policies existing v2 store object (plain map)
+ * @param {unknown} legacyModes v1 store object ({[host]: mode})
+ * @returns {{policies: object, changed: boolean}}
+ */
+function migrateLegacyModes(policies, legacyModes) {
+  const out = { ...(policies ?? {}) };
+  let changed = false;
+  for (const [raw, mode] of Object.entries(legacyModes ?? {})) {
+    if (mode === MODES.OBSERVE) continue; // absence is already "observe"
+    const preset = presetFor(mode);
+    if (preset && !isFlags(out[raw])) {
+      out[raw] = preset;
+      changed = true;
+    }
+  }
+  return { policies: out, changed };
+}
+
+/**
+ * Non-executable container categories the DOM layer may remove, keyed to the
+ * flag that gates each removal. Categories absent here (e.g. unknown-script-
+ * container) are observation-only: the observer never removes them.
+ */
+const REMOVAL_FLAG_BY_CATEGORY = Object.freeze({
+  "json-ld": "blockJsonLd",
+  "json-data": "blockJsonData",
+  "import-map": "blockImportMaps",
+  "speculation-rules": "blockSpeculationRules",
+});
 
 (() => {
   const FLUSH_INTERVAL_MS = 250;
