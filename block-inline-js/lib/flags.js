@@ -69,7 +69,7 @@ export const REMOVAL_FLAG_BY_CATEGORY = Object.freeze({
 /**
  * Builds a full flag bundle from partial overrides. Throws on unknown keys so
  * a typo can never silently disable a control.
- * @param {Partial<typeof DEFAULT_FLAGS>} [overrides]
+ * @param {Partial<{[K in keyof typeof DEFAULT_FLAGS]: boolean}>} [overrides]
  * @returns {{[K in keyof typeof DEFAULT_FLAGS]: boolean}}
  */
 export function makeFlags(overrides = {}) {
