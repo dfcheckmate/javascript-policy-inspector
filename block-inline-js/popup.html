@@ -75,6 +75,28 @@
     <ul id="exc-list"></ul>
   </fieldset>
 
+  <fieldset>
+    <legend>Allowed script hashes on this site</legend>
+    <form id="allow-hash-form">
+      <input
+        id="allow-hash-input"
+        type="text"
+        placeholder="sha256-… token, or paste script code to hash"
+        autocomplete="off"
+      />
+      <select id="allow-hash-kind" title="Hash kind">
+        <option value="script">script</option>
+        <option value="attr">handler</option>
+      </select>
+      <button type="submit">Allow</button>
+    </form>
+    <p class="hint">
+      Paste a sha256-… token from the Activity panel, or paste script code
+      to compute its token. The hash is computed over the exact text you paste.
+    </p>
+    <ul id="allow-hash-list"></ul>
+  </fieldset>
+
   <h2>Inventory</h2>
   <div id="inventory" class="counts"></div>
   <ul id="detail" class="detail"></ul>

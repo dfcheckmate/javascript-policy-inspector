@@ -182,6 +182,92 @@ button.active {
 
 #exc-list li button { color: #6ee7b7; }
 
+/* --- allowed script hashes (manual per-hash allowances) --- */
+
+#allow-hash-form {
+  display: flex;
+  gap: 6px;
+}
+
+#allow-hash-form input,
+#allow-hash-form select {
+  border: 1px solid #404040;
+  border-radius: 6px;
+  padding: 6px;
+  background: #262626;
+  color: #e0e0e0;
+  font-family: Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+#allow-hash-form input {
+  flex: 1;
+  min-width: 0;
+}
+
+#allow-hash-form button {
+  width: auto;
+  padding: 6px 10px;
+  font-size: 11px;
+}
+
+#allow-hash-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+#allow-hash-list li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: #451a03;
+  border: 1px solid #b45309;
+  color: #fde68a;
+  border-radius: 999px;
+  padding: 1px 4px 1px 8px;
+  font-size: 11px;
+  font-family: Menlo, Consolas, monospace;
+  max-width: 100%;
+}
+
+#allow-hash-list li code.hash {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: copy;
+}
+
+#allow-hash-list li .hash-kind {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #fbbf24;
+  background: #78350f;
+  border-radius: 999px;
+  padding: 0 5px;
+}
+
+#allow-hash-list li button { color: #fcd34d; }
+
+code.hash {
+  font-family: Menlo, Consolas, monospace;
+  font-size: 10px;
+  color: #fbbf24;
+  cursor: copy;
+  word-break: break-all;
+}
+
+.detail li code.hash {
+  max-width: 180px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .detail {
   list-style: none;
   max-height: 240px;

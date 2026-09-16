@@ -225,6 +225,55 @@ test("clear-site wipes the host's policy and related storage", async () => {
   await local.set({ sitePolicies: {}, siteExceptions: {}, siteInlineAllows: {}, siteContainerAllows: {}, pausedUntil: {}, siteModes: {} });
 });
 
+test("add-inline-allow stores hashes; remove-inline-allow deletes one kind", async () => {
+  const SCRIPT = `sha256-${"A".repeat(43)}=`;
+  const ATTR = `sha256-${"B".repeat(43)}=`;
+
+  // dedupe on re-add
+  await drive({ type: "add-inline-allow", host: "hash.example", kind: "script", hash: SCRIPT });
+  await drive({ type: "add-inline-allow", host: "hash.example", kind: "script", hash: SCRIPT });
+  await drive({ type: "add-inline-allow", host: "hash.example", kind: "attr", hash: ATTR });
+
+  let state = await drive({ type: "get-state", host: "hash.example" });
+  assert.deepEqual(state.inlineAllows, { scripts: [SCRIPT], attrs: [ATTR] });
+
+  const rem = await drive({
+    type: "remove-inline-allow",
+    host: "hash.example",
+    kind: "script",
+    hash: SCRIPT,
+  });
+  assert.deepEqual(rem.inlineAllows, { scripts: [], attrs: [ATTR] });
+
+  state = await drive({ type: "get-state", host: "hash.example" });
+  assert.deepEqual(state.inlineAllows, { scripts: [], attrs: [ATTR] });
+
+  // unknown hashes are a no-op; the attr- prefix is tolerated on remove
+  const UNKNOWN = `sha256-${"C".repeat(43)}=`;
+  const unknown = await drive({
+    type: "remove-inline-allow",
+    host: "hash.example",
+    kind: "script",
+    hash: UNKNOWN,
+  });
+  assert.equal(unknown.error, undefined);
+  state = await drive({ type: "get-state", host: "hash.example" });
+  assert.deepEqual(state.inlineAllows, { scripts: [], attrs: [ATTR] });
+
+  const prefixed = await drive({
+    type: "remove-inline-allow",
+    host: "hash.example",
+    kind: "attr",
+    hash: `attr-${ATTR}`,
+  });
+  assert.deepEqual(prefixed.inlineAllows, { scripts: [], attrs: [] });
+  state = await drive({ type: "get-state", host: "hash.example" });
+  assert.deepEqual(state.inlineAllows, { scripts: [], attrs: [] });
+
+  // clean up the host's (now-empty) entry in the shared test store
+  await CHROME.storage.local.set({ siteInlineAllows: {} });
+});
+
 test("clear-tab flushes session keys and override", async () => {
   const { session } = CHROME.storage;
   // pre-seed a session event and an override

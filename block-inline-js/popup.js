@@ -8,6 +8,7 @@ import {
   enforceInlineBase,
 } from "./lib/flags.js";
 import { normalizeHostForRule } from "./lib/host.js";
+import { canonicalAllowKey, normalizeInlineHash } from "./lib/allow.js";
 import { beautify } from "./lib/beautify.js";
 import { highlight } from "./lib/highlight.js";
 
@@ -24,6 +25,10 @@ const els = {
   excForm: document.getElementById("exc-form"),
   excInput: document.getElementById("exc-input"),
   excList: document.getElementById("exc-list"),
+  allowHashForm: document.getElementById("allow-hash-form"),
+  allowHashInput: document.getElementById("allow-hash-input"),
+  allowHashKind: document.getElementById("allow-hash-kind"),
+  allowHashList: document.getElementById("allow-hash-list"),
   exportBtn: document.getElementById("export-btn"),
   importBtn: document.getElementById("import-btn"),
   importFile: document.getElementById("import-file"),
@@ -403,6 +408,61 @@ function renderExceptions(list) {
   }
 }
 
+/**
+ * Computes the CSP sha256 token for a script's source text: "sha256-" + the
+ * base64 digest over the exact bytes provided, matching the token CSP would
+ * use to allow an inline script whose source equals `text`.
+ * @param {string} text
+ * @returns {Promise<string>}
+ */
+async function sha256Token(text) {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text),
+  );
+  const bin = String.fromCharCode(...new Uint8Array(digest));
+  return `sha256-${btoa(bin)}`;
+}
+
+/** Lists per-host allowed inline script/handler hashes with a remove affordance. */
+function renderInlineAllows(inlineAllows) {
+  els.allowHashList.replaceChildren();
+  const entries = [
+    ...(inlineAllows?.scripts ?? []).map((hash) => ({ kind: "script", hash })),
+    ...(inlineAllows?.attrs ?? []).map((hash) => ({ kind: "attr", hash })),
+  ];
+  if (entries.length === 0) {
+    const li = document.createElement("li");
+    li.className = "muted";
+    li.textContent = "no inline scripts allowed by hash yet";
+    els.allowHashList.append(li);
+    return;
+  }
+  for (const { kind, hash } of entries) {
+    const li = document.createElement("li");
+    const code = document.createElement("code");
+    code.className = "hash";
+    code.title = "sha256 token (click to copy)";
+    code.textContent = hash;
+    code.addEventListener("click", () => {
+      navigator.clipboard?.writeText?.(hash);
+    });
+    li.append(code);
+    const kindSpan = document.createElement("span");
+    kindSpan.className = "hash-kind";
+    kindSpan.textContent = kind;
+    li.append(kindSpan);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.removeHash = hash;
+    btn.dataset.removeKind = kind;
+    btn.title = "Remove this hash allowance";
+    btn.textContent = "×";
+    li.append(btn);
+    els.allowHashList.append(li);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // trace / diagnostics (gated off unless Alt is held / #debug hash; always
 // records a short bounded tail for the "Copy diagnostics" dump)
@@ -526,6 +586,7 @@ async function refreshUi() {
   renderPaused(state.pausedUntil);
   renderTabOverride(Boolean(state.tabOverride));
   renderExceptions(exceptions);
+  renderInlineAllows(lastInlineAllows);
   await loadActivity();
 }
 
@@ -652,6 +713,52 @@ els.excList.addEventListener("click", async (event) => {
   const origin = event.target?.dataset?.origin;
   if (!origin || !host) return;
   await traceSend({ type: "remove-exception", host, origin });
+  await refreshUi();
+});
+
+// Allow an inline script/handler by hash: accepts an existing "sha256-…"
+// token verbatim, or treats the pasted text as script source to hash (computed
+// client-side with WebCrypto, so no source ever leaves the popup).
+els.allowHashForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!host) return;
+  const raw = els.allowHashInput.value.trim();
+  if (!raw) return;
+  const kind = els.allowHashKind.value === "attr" ? "attr" : "script";
+  let hash;
+  try {
+    hash = normalizeInlineHash(raw);
+  } catch {
+    try {
+      hash = await sha256Token(raw);
+    } catch (err) {
+      showAllowNote(`Could not hash input: ${err.message}`, false);
+      return;
+    }
+  }
+  const res = await traceSend({ type: "add-inline-allow", host, kind, hash });
+  if (res?.error) {
+    showAllowNote(`Allow failed: ${res.error}`, false);
+    return;
+  }
+  els.allowHashInput.value = "";
+  showAllowNote(`${kind} hash allowed \u2014 reload to apply?`, true);
+  await refreshUi();
+});
+
+els.allowHashList.addEventListener("click", async (event) => {
+  const btn = event.target.closest("button[data-remove-hash]");
+  if (!btn || !host) return;
+  const res = await traceSend({
+    type: "remove-inline-allow",
+    host,
+    kind: btn.dataset.removeKind,
+    hash: btn.dataset.removeHash,
+  });
+  if (res?.error) {
+    showAllowNote(`Remove failed: ${res.error}`, false);
+    return;
+  }
   await refreshUi();
 });
 
@@ -852,9 +959,9 @@ function detailRows(view, events) {
     if ((view === "first" || view === "third") && row.origin) {
       action = { kind: "origin", value: row.origin };
     } else if (view === "inline-script" && row.hash) {
-      action = { kind: "script", value: row.hash };
+      action = { kind: "script", value: canonicalAllowKey(row.hash) };
     } else if (view === "inline-handler" && row.hash) {
-      action = { kind: "attr", value: row.hash };
+      action = { kind: "attr", value: canonicalAllowKey(row.hash) };
     } else if (view === "removed" && row.digest) {
       action = { kind: "container", value: row.digest };
     }
@@ -864,7 +971,7 @@ function detailRows(view, events) {
 
 function appendDetailRow(
   el,
-  { cls, label, badgeValue, allowed, allowKind, allowValue, source, sourceUrl },
+  { cls, label, badgeValue, allowed, allowKind, allowValue, source, sourceUrl, hashToken },
 ) {
   const li = document.createElement("li");
   if (cls) li.className = cls;
@@ -878,6 +985,16 @@ function appendDetailRow(
     badgeSpan.className = "badge";
     badgeSpan.textContent = badgeValue;
     li.append(badgeSpan);
+  }
+  if (hashToken) {
+    const code = document.createElement("code");
+    code.className = "hash";
+    code.title = "sha256 token (click to copy)";
+    code.textContent = hashToken;
+    code.addEventListener("click", () => {
+      navigator.clipboard?.writeText?.(hashToken);
+    });
+    li.append(code);
   }
   if (source != null) {
     const details = document.createElement("details");
@@ -1050,7 +1167,9 @@ function renderDetail(view, events, inlineAllows, exceptions) {
     let allowValue = null;
     if (row.action) {
       const alreadyAllowed =
-        row.action.kind === "origin" ? false : allowedSet.has(row.action.value);
+        row.action.kind === "origin"
+          ? false
+          : allowedSet.has(canonicalAllowKey(row.action.value));
       if (alreadyAllowed) {
         allowKind = "";
       } else {
@@ -1073,6 +1192,7 @@ function renderDetail(view, events, inlineAllows, exceptions) {
             ? row.raw ?? null
             : null,
       sourceUrl: row.url && !isInline ? row.url : null,
+      hashToken: isInline && row.hash ? row.hash : null,
     });
   }
 }

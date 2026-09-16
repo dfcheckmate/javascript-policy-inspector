@@ -693,6 +693,20 @@ async function addInlineAllow(host, kind, hash) {
   return entry;
 }
 
+/** Removes one stored inline hash token ("sha256-…") from a host's allowlist. */
+async function removeInlineAllow(host, kind, hash) {
+  const clean = String(hash).replace(/^attr-/, "");
+  const prop = kind === "attr" ? "attrs" : "scripts";
+  const all = await getInlineAllows();
+  const key = canon(host);
+  const entry = all[key] ?? { scripts: [], attrs: [] };
+  entry[prop] = (entry[prop] ?? []).filter((h) => h !== clean);
+  all[key] = entry;
+  await chrome.storage.local.set({ [INLINE_ALLOWS_KEY]: all });
+  await syncRules();
+  return entry;
+}
+
 /**
  * Exempts one non-executing container from DOM removal on a host by adding
  * its SHA-256 hex digest to the allowlist (watched by the observer's removal
@@ -866,6 +880,8 @@ function notifyStateChanged() {
  * - {type:"toggle-tab-override", tabId}-> {active}
  * - {type:"add-exception", host, origin}    -> {exceptions}
  * - {type:"remove-exception", host, origin}-> {exceptions}
+ * - {type:"add-inline-allow", host, kind, hash}    -> {inlineAllows}
+ * - {type:"remove-inline-allow", host, kind, hash} -> {inlineAllows}
  * - {type:"export-settings"}           -> {version:2, sitePolicies, siteExceptions, siteInlineAllows, siteContainerAllows}
  * - {type:"import-settings", data}     -> {ok:true} (accepts v1 siteModes + v2 sitePolicies)
  * - {type:"add-container-allow", host, digest}    -> {containerAllows}
@@ -1004,6 +1020,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "add-inline-allow":
         sendResponse({
           inlineAllows: await addInlineAllow(msg.host, msg.kind, msg.hash),
+        });
+        break;
+      case "remove-inline-allow":
+        sendResponse({
+          inlineAllows: await removeInlineAllow(msg.host, msg.kind, msg.hash),
         });
         break;
       case "add-container-allow":
