@@ -86,6 +86,7 @@ const sharedSkip = new Set([
   "manifest.json",
   "manifest.firefox.json",
   "service-worker.bundled.js",
+  "scripts",
 ]);
 
 function emitDist(dir, extraSkip = []) {
