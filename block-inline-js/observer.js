@@ -24,12 +24,63 @@
  * Until the bundle resolves, removals are deferred to the catch-up sweep —
  * the default profile (DEFAULT_POLICY = observe) removes nothing.
  */
-
-
 /* ════════════════════════════════════════════════════════════════════
  * ══ vendored from lib/classify.js (source of truth — DO NOT EDIT THIS BLOCK;
  * ══ edit lib/classify.js and re-run scripts/vendor-observer.mjs) ══
  * ════════════════════════════════════════════════════════════════════ */
+const CATEGORIES = Object.freeze({
+  JSON_LD: "json-ld",
+  JSON_DATA: "json-data",
+  IMPORT_MAP: "import-map",
+  SPECULATION_RULES: "speculation-rules",
+  INLINE_JAVASCRIPT: "inline-javascript",
+  EXTERNAL_JAVASCRIPT: "external-javascript",
+  JAVASCRIPT_URL: "javascript-url",
+  UNKNOWN_SCRIPT_CONTAINER: "unknown-script-container",
+});
+
+/** Categories whose payload actually executes as JavaScript. */
+const EXECUTABLE_TYPES = Object.freeze([
+  CATEGORIES.INLINE_JAVASCRIPT,
+  CATEGORIES.EXTERNAL_JAVASCRIPT,
+]);
+
+const JS_LANGUAGE_TYPES = new Set([
+  "application/ecmascript",
+  "application/javascript",
+  "application/x-ecmascript",
+  "application/x-javascript",
+  "text/ecmascript",
+  "text/javascript",
+  "text/javascript1.0",
+  "text/javascript1.1",
+  "text/javascript1.2",
+  "text/javascript1.3",
+  "text/javascript1.4",
+  "text/javascript1.5",
+  "text/jscript",
+  "text/livescript",
+  "text/x-ecmascript",
+  "text/x-javascript",
+  "module",
+]);
+
+/** Normalizes a `type` attribute for comparison: trimmed + lowercased. */
+function normalizeType(type) {
+  return (type ?? "").trim().toLowerCase();
+}
+
+/**
+ * True when a <script> element with this `type` would execute (bare classic,
+ * a legacy JS MIME, or a module).
+ * @param {string | null | undefined} type
+ * @returns {boolean}
+ */
+function isJavaScriptType(type) {
+  const t = normalizeType(type);
+  return t === "" || JS_LANGUAGE_TYPES.has(t);
+}
+
 /**
  * Classifies a <script> element from its src/type attributes.
  * @param {{ src?: string | null, type?: string | null }} [descriptor]
@@ -97,21 +148,25 @@ function isJavaScriptUrl(value) {
   return typeof value === "string" && /^\s*javascript\s*:/i.test(value);
 }
 
-const CATEGORIES = Object.freeze({
-  JSON_LD: "json-ld",
-  JSON_DATA: "json-data",
-  IMPORT_MAP: "import-map",
-  SPECULATION_RULES: "speculation-rules",
-  INLINE_JAVASCRIPT: "inline-javascript",
-  EXTERNAL_JAVASCRIPT: "external-javascript",
-  JAVASCRIPT_URL: "javascript-url",
-  UNKNOWN_SCRIPT_CONTAINER: "unknown-script-container",
-});
-
 /* ════════════════════════════════════════════════════════════════════
  * ══ vendored from lib/host.js (source of truth — DO NOT EDIT THIS BLOCK;
  * ══ edit lib/host.js and re-run scripts/vendor-observer.mjs) ══
  * ════════════════════════════════════════════════════════════════════ */
+/**
+ * Multi-label public suffixes needing a 3-label registrable dominance match.
+ * This is a pragmatic, curated subset (no PSL dependency ships with the
+ * extension). Unknown multi-label suffixes fall back to the last 2 labels;
+ * `localhost` and IP addresses pass through untouched.
+ */
+const MULTI_LABEL_SUFFIXES = new Set([
+  "co.uk", "org.uk", "ac.uk", "gov.uk", "co.jp", "ne.jp", "ac.jp",
+  "com.au", "net.au", "org.au", "co.nz", "net.nz", "org.nz",
+  "co.in", "com.br", "com.mx", "co.za", "co.il", "com.tr", "co.kr",
+  "com.cn", "net.cn", "org.cn", "com.hk", "com.sg", "com.my",
+  "co.th", "com.tw", "com.vn", "com.pe", "com.co", "com.ar",
+  "com.eg", "com.sa", "com.ua",
+]);
+
 /**
  * Reduces any hostname to its registrable (eTLD+1) form.
  *
@@ -142,6 +197,114 @@ function normalizeHostForRule(host) {
  * ══ vendored from lib/flags.js (source of truth — DO NOT EDIT THIS BLOCK;
  * ══ edit lib/flags.js and re-run scripts/vendor-observer.mjs) ══
  * ════════════════════════════════════════════════════════════════════ */
+/** @type {{readonly OBSERVE: "observe"; readonly FIRST_PARTY_ONLY: "firstPartyOnly"; readonly NO_SCRIPTS: "noScripts"}} */
+const MODES = Object.freeze({
+  OBSERVE: "observe",
+  FIRST_PARTY_ONLY: "firstPartyOnly",
+  NO_SCRIPTS: "noScripts",
+});
+
+/** @type {readonly (keyof typeof DEFAULT_FLAGS)[]} */
+const FLAG_KEYS = Object.freeze([
+  "blockClassicScripts",
+  "blockModuleScripts",
+  "blockExternalScripts",
+  "blockThirdPartyScripts",
+  "blockInlineEventHandlers",
+  "blockJavascriptUrls",
+  "blockImportMaps",
+  "blockSpeculationRules",
+  "blockJsonLd",
+  "blockJsonData",
+  "reportBlockedContent",
+]);
+
+const DEFAULT_FLAGS = Object.freeze({
+  blockClassicScripts: false,
+  blockModuleScripts: false,
+  blockExternalScripts: false,
+  blockThirdPartyScripts: false,
+  blockInlineEventHandlers: false,
+  blockJavascriptUrls: false,
+  blockImportMaps: false,
+  blockSpeculationRules: false,
+  blockJsonLd: false,
+  blockJsonData: false,
+  reportBlockedContent: true,
+});
+
+/**
+ * Non-executable container categories the DOM layer may remove, keyed to the
+ * flag that gates each removal. Categories absent here (e.g. unknown-script-
+ * container) are observation-only: the observer never removes them.
+ */
+const REMOVAL_FLAG_BY_CATEGORY = Object.freeze({
+  "json-ld": "blockJsonLd",
+  "json-data": "blockJsonData",
+  "import-map": "blockImportMaps",
+  "speculation-rules": "blockSpeculationRules",
+});
+
+/**
+ * Builds a full flag bundle from partial overrides. Throws on unknown keys so
+ * a typo can never silently disable a control.
+ * @param {Partial<{[K in keyof typeof DEFAULT_FLAGS]: boolean}>} [overrides]
+ * @returns {{[K in keyof typeof DEFAULT_FLAGS]: boolean}}
+ */
+function makeFlags(overrides = {}) {
+  /** @type {{[K in keyof typeof DEFAULT_FLAGS]: boolean}} */
+  const flags = { ...DEFAULT_FLAGS };
+  for (const [key, value] of Object.entries(overrides)) {
+    if (!FLAG_KEYS.includes(key)) throw new Error(`unknown flag: ${key}`);
+    flags[key] = Boolean(value);
+  }
+  return flags;
+}
+
+/** @param {unknown} value @returns {value is {[K in keyof typeof DEFAULT_FLAGS]: boolean}} */
+function isFlags(value) {
+  if (!value || typeof value !== "object") return false;
+  return FLAG_KEYS.every((k) => typeof value[k] === "boolean");
+}
+
+/**
+ * Built-in policy presets. A preset is a named, immutable flag bundle; the
+ * popup radios map directly onto these.
+ *
+ * firstPartyOnly: blocks inline execution, handlers, javascript: URLs, third-
+ * party scripts and (per the layered-policy decision) JSON-LD containers.
+ * noScripts: everything except JSON *data* — inert `application/json` blocks
+ * stay removable only by explicit opt-in.
+ */
+const PRESETS = Object.freeze({
+  [MODES.OBSERVE]: Object.freeze(makeFlags()),
+  [MODES.FIRST_PARTY_ONLY]: Object.freeze(
+    makeFlags({
+      blockClassicScripts: true,
+      blockModuleScripts: true,
+      blockThirdPartyScripts: true,
+      blockInlineEventHandlers: true,
+      blockJavascriptUrls: true,
+      blockImportMaps: true,
+      blockSpeculationRules: true,
+      blockJsonLd: true,
+    }),
+  ),
+  [MODES.NO_SCRIPTS]: Object.freeze(
+    makeFlags({
+      blockClassicScripts: true,
+      blockModuleScripts: true,
+      blockExternalScripts: true,
+      blockThirdPartyScripts: true,
+      blockInlineEventHandlers: true,
+      blockJavascriptUrls: true,
+      blockImportMaps: true,
+      blockSpeculationRules: true,
+      blockJsonLd: true,
+    }),
+  ),
+});
+
 /**
  * Default policy for hosts with no stored preference — observe. Chosen for
  * bot-classification safety: a stable, sensor-loading posture is the profile
@@ -149,10 +312,17 @@ function normalizeHostForRule(host) {
  */
 const DEFAULT_POLICY = PRESETS[MODES.OBSERVE];
 
-/** @param {unknown} value @returns {value is {[K in keyof typeof DEFAULT_FLAGS]: boolean}} */
-function isFlags(value) {
-  if (!value || typeof value !== "object") return false;
-  return FLAG_KEYS.every((k) => typeof value[k] === "boolean");
+/** @param {unknown} value @returns {value is keyof typeof MODES} */
+function isPresetName(value) {
+  return typeof value === "string" && Object.hasOwn(PRESETS, value);
+}
+
+/**
+ * @param {string | undefined} name
+ * @returns {{[K in keyof typeof DEFAULT_FLAGS]: boolean} | null}
+ */
+function presetFor(name) {
+  return isPresetName(name) ? PRESETS[name] : null;
 }
 
 /**
@@ -175,18 +345,6 @@ function migrateLegacyModes(policies, legacyModes) {
   }
   return { policies: out, changed };
 }
-
-/**
- * Non-executable container categories the DOM layer may remove, keyed to the
- * flag that gates each removal. Categories absent here (e.g. unknown-script-
- * container) are observation-only: the observer never removes them.
- */
-const REMOVAL_FLAG_BY_CATEGORY = Object.freeze({
-  "json-ld": "blockJsonLd",
-  "json-data": "blockJsonData",
-  "import-map": "blockImportMaps",
-  "speculation-rules": "blockSpeculationRules",
-});
 
 (() => {
   const FLUSH_INTERVAL_MS = 250;
