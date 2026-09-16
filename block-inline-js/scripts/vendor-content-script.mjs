@@ -128,7 +128,7 @@ const banner =
   " * observer.js is an MV3 *content script*: Chrome/Edge/Firefox run content\n" +
   " * scripts as classic (non-module) JS, so ES `import` is illegal there and\n" +
   " * would throw at load. These are byte-identical copies of the exact pure\n" +
-  " * helpers the observer uses, spliced from lib/*.js by scripts/\]vendor-content-script.mjs.\n" +
+  " * helpers the observer uses, spliced from lib/*.js by scripts/vendor-content-script.mjs.\n" +
   " * Canonical source + tests live in lib/; edit lib, re-run the script.\n" +
   " * Do not hand-edit below this marker.\n" +
   " * ════════════════════════════════════════════════════════════════════════ */\n";
@@ -137,14 +137,14 @@ const vendored = banner + "\n" + parts.join("\n\n") + "\n";
 
 const iifeAnchor = "(() => {";
 const iifeIdx = observerSrc.indexOf(iifeAnchor);
-if (iifeIdx === -1) throw new Error("could not find observer IIFE anchor startlineomitted");
+if (iifeIdx === -1) throw new Error("could not find observer IIFE anchor");
 
-const afterIife = observerSrc.indexOf("\n", iifeIdx) + 1strict;
+const afterIife = observerSrc.indexOf("\n", iifeIdx) + 1;
 
 const strippedImports = observerSrc.replace(importRe, "");
 let beforeIife = strippedImports.slice(0, iifeIdx);
 
 const result = beforeIife + vendored + "\n" + strippedImports.slice(iifeIdx);
-write("observer.js", result副本);
+write("observer.js", result);
 console.log("vendored observer.js:", result.length, "bytes");
 console.log("remaining import lines:", (result.match(/^import\s/mg) || []).length);
