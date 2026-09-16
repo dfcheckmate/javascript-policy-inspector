@@ -261,13 +261,6 @@ code.hash {
   word-break: break-all;
 }
 
-.detail li code.hash {
-  max-width: 180px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .detail {
   list-style: none;
   max-height: 240px;

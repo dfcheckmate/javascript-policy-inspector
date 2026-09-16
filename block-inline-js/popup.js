@@ -1284,7 +1284,11 @@ function renderActivity(events) {
           ? `${KIND_LABELS[e.kind] ?? e.kind} (${e.category ?? "?"})${
               e.action === "removed" ? " \u2014 removed" : ""
             }: ${e.snippet ?? e.url ?? ""}`
-          : `${KIND_LABELS[e.kind] ?? e.kind}${e.url ? `: ${e.url}` : ""}`;
+          : e.kind === "inline-script" || e.kind === "inline-handler"
+            ? `${KIND_LABELS[e.kind] ?? e.kind}${
+                e.snippet ? `: ${e.snippet}` : ""
+              }`
+            : `${KIND_LABELS[e.kind] ?? e.kind}${e.url ? `: ${e.url}` : ""}`;
     const li = document.createElement("li");
     if (e.action === "blocked" || e.action === "removed") li.className = e.action;
     li.title = what;
@@ -1295,6 +1299,16 @@ function renderActivity(events) {
     line.className = "line";
     line.textContent = what;
     li.append(time, rawText, line);
+    if (e.hash) {
+      const code = document.createElement("code");
+      code.className = "hash";
+      code.title = "sha256 token (click to copy)";
+      code.textContent = ` [${e.hash}]`;
+      code.addEventListener("click", () => {
+        navigator.clipboard?.writeText?.(e.hash);
+      });
+      li.append(code);
+    }
     els.activity.append(li);
   }
 }
